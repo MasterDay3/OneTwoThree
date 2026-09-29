@@ -1,0 +1,125 @@
+name: Deploy
+
+# Every push to main: lint + tests, then the same `make deploy-*` targets a developer runs locally.
+# No workflow_dispatch/pull_request: only main may assume the AWS deploy role (see infra/github-oidc.yaml).
+on:
+  push:
+    branches: [main]
+
+# One deploy at a time, in push order. A running deploy is never cancelled; GitHub keeps only the
+# newest pending run, so runs queued in between show as "cancelled".
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    uses: ./.github/workflows/code-style.yml
+
+  back-test:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: meetings
+          POSTGRES_PASSWORD: meetings
+          POSTGRES_DB: meetings_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U meetings -d meetings_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: back
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: back/pyproject.toml
+
+      - name: Install dependencies
+        run: uv sync --python 3.12
+
+      - name: Test
+        env:
+          TEST_DATABASE_URL: postgresql+psycopg://meetings:meetings@localhost:5432/meetings_test
+        run: uv run pytest -q
+
+  front-test:
+    name: Frontend tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: front
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Test
+        run: npm test
+
+  deploy:
+    name: Deploy to AWS
+    needs: [lint, back-test, front-test]
+    if: github.ref == 'refs/heads/main'
+    # The Lambda runs on arm64 (Graviton): build the image natively instead of under emulation.
+    runs-on: ubuntu-24.04-arm
+    # No `environment:` here: it would change the OIDC subject and the role's trust policy would deny it.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - name: Ensure AWS CLI v2
+        run: |
+          if ! aws --version 2>/dev/null; then
+            curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip -o /tmp/awscliv2.zip
+            unzip -q /tmp/awscliv2.zip -d /tmp && sudo /tmp/aws/install && aws --version
+          fi
+
+      # Short-lived credentials for this run only: GitHub's OIDC token is exchanged for the deploy role.
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: deploy-${{ github.run_id }}
+          aws-region: us-east-1
+
+      # A .env would be read by the Makefile; CI must use only the OIDC credentials.
+      - name: Guard against a .env in the checkout
+        run: test ! -f .env || { echo "unexpected .env in CI checkout"; exit 1; }
+
+      - name: Deploy backend (image tagged with the commit SHA)
+        env:
+          TAG: ${{ github.sha }}
+        run: make deploy-backend TAG="$TAG"
+
+      - name: Deploy frontend
+        run: make deploy-frontend
