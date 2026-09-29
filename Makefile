@@ -36,9 +36,11 @@ export AWS_DEFAULT_REGION := $(AWS_REGION)
 
 # arm64 (Graviton, cheaper; native on Apple Silicon) or amd64
 ARCH        ?= arm64
-# Image tag = the full commit SHA (CI passes TAG=$${{ github.sha }}), so the running image names its commit
+# Image tag = the full commit SHA (CI passes the pushed commit's SHA), so the running image names its commit
 # and a rollback is "deploy the previous tag". Lambda only picks up a new image when its URI changes,
 # so uncommitted builds get a unique -dirty-<timestamp> suffix. Never `latest`.
+# Only an explicitly given TAG may be a rollback target (see aws-backend-rollback).
+_USER_TAG   := $(TAG)
 ifndef TAG
 TAG         := $(shell sha=$$(git rev-parse HEAD 2>/dev/null) && { git diff --quiet HEAD 2>/dev/null && echo $$sha || echo $$sha-dirty-$$(date +%Y%m%d%H%M%S); } || date +%Y%m%d%H%M%S)
 endif
@@ -48,6 +50,8 @@ BACKEND_STACK     := $(PROJECT)-backend
 BACKEND_FUNCTION  := $(PROJECT)-backend
 BACKEND_PARAMS    := infra/backend.params.env
 BACKEND_DOMAIN_STACK := $(PROJECT)-backend-domain
+OIDC_STACK        := $(PROJECT)-github-oidc
+GITHUB_REPO       := MasterDay3/OneTwoThree
 FRONTEND_STACK    := $(PROJECT)-frontend
 COGNITO_STACK     := $(PROJECT)-cognito
 # Every resource gets this tag (in the templates and as a stack tag).
@@ -97,6 +101,9 @@ COGNITO_POOL_ID   = $(call cognito_output,UserPoolId)
 COGNITO_CLIENT    = $(call cognito_output,UserPoolClientId)
 FRONTEND_CERT_ARN = $(if $(FRONTEND_DOMAIN),$(shell $(LOAD_ENV) $(CERT_SH) arn $(FRONTEND_DOMAIN) 2>/dev/null))
 FRONTEND_ZONE_ID  = $(shell $(LOAD_ENV) $(CERT_SH) zone-id $(FRONTEND_DOMAIN) 2>/dev/null)
+BACKEND_CERT_ARN  = $(if $(BACKEND_DOMAIN),$(shell $(LOAD_ENV) $(CERT_SH) arn $(BACKEND_DOMAIN) 2>/dev/null))
+BACKEND_ZONE_ID   = $(shell $(LOAD_ENV) $(CERT_SH) zone-id $(BACKEND_DOMAIN) 2>/dev/null)
+oidc_output       = $(call stack_output,$(OIDC_STACK),$(1))
 # The custom domain is attached once its certificate is issued; until then only the CloudFront domain serves.
 FRONTEND_DOMAIN_ARGS = $(if $(FRONTEND_CERT_ARN),CertificateArn=$(FRONTEND_CERT_ARN) DomainName=$(FRONTEND_DOMAIN) HostedZoneId=$(FRONTEND_ZONE_ID))
 
@@ -217,15 +224,20 @@ aws-backend-push: aws-backend-login ## Build the Lambda image for linux/$(ARCH) 
 	  -t $(ECR_URI):$(TAG) --push back
 
 .PHONY: aws-backend-stack
-aws-backend-stack: ## Create/update the backend stack (VPC, Aurora, Lambda) with image tag $(TAG); KEEP_IMAGE=1 keeps the current image
+aws-backend-stack: ## Create/update the backend stack (VPC, Aurora, Lambda) with image tag $(TAG); KEEP_IMAGE=1 keeps the image running now
 	$(call clear_failed_stack,$(BACKEND_STACK))
 	@test -n "$(ECR_URI)" || { echo "ECR repository not found: run \`make aws-backend-ecr\` first (and check AWS credentials in .env)"; exit 1; }
 	@test -n "$(COGNITO_POOL_ID)" || { echo "Cognito not deployed: run \`make aws-cognito-deploy\` first"; exit 1; }
 	@# The function has no internet route, so the pool's signing keys are passed in with the stack.
+	@# KEEP_IMAGE=1 passes the image the Lambda runs now: deploy-backend/rollback change it outside
+	@# CloudFormation, so the stack's own last-known ImageUri may be stale.
+	$(if $(KEEP_IMAGE),image=$$(aws lambda get-function --function-name $(BACKEND_FUNCTION) \
+	  --query Code.ImageUri --output text) || exit 1; [ -n "$$image" ] && [ "$$image" != None ] \
+	  || { echo "No live Lambda image found: deploy the backend first"; exit 1; };,image=$(ECR_URI):$(TAG);) \
 	jwks=$$(curl -fsS "$(call cognito_output,Issuer)/.well-known/jwks.json") && \
 	aws cloudformation deploy --stack-name $(BACKEND_STACK) --template-file infra/backend.yaml \
 	  --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset --tags $(STACK_TAGS) \
-	  --parameter-overrides ProjectName=$(PROJECT) $(if $(KEEP_IMAGE),,ImageUri=$(ECR_URI):$(TAG)) \
+	  --parameter-overrides ProjectName=$(PROJECT) "ImageUri=$$image" \
 	    Architecture=$(LAMBDA_ARCH) "CorsOrigins=$(CORS_ORIGINS_AWS)" \
 	    CognitoUserPoolId=$(COGNITO_POOL_ID) CognitoClientId=$(COGNITO_CLIENT) "CognitoJwks=$$jwks" \
 	    $(BACKEND_PARAMS_ARGS)
@@ -245,6 +257,21 @@ aws-backend-migrate: ## Run Alembic migrations (and seeding) inside the Lambda
 	  --payload '{"action": "migrate"}' --cli-read-timeout 0 --query FunctionError --output text "$$resp"); \
 	echo "Migrations: $$(cat "$$resp")"; rm -f "$$resp"; \
 	[ "$$err" = None ] || { echo "Migration failed ($$err): make aws-backend-logs"; exit 1; }
+
+.PHONY: aws-backend-rollback
+aws-backend-rollback: require-rollback-tag aws-check ## Run an earlier image again: TAG=<sha> (ECR keeps the last 5; no rebuild, no migration, schema is not reverted)
+	@aws ecr describe-images --repository-name $(PROJECT)-backend --image-ids imageTag=$(TAG) \
+	  --query 'imageDetails[0].imagePushedAt' --output text >/dev/null \
+	  || { echo "Image tag $(TAG) not in ECR (the repository keeps only the last 5 images)"; exit 1; }
+	aws lambda wait function-updated-v2 --function-name $(BACKEND_FUNCTION)
+	aws lambda update-function-code --function-name $(BACKEND_FUNCTION) --image-uri $(ECR_URI):$(TAG) \
+	  --query CodeSha256 --output text
+	aws lambda wait function-updated-v2 --function-name $(BACKEND_FUNCTION)
+	@echo "Backend now runs $(TAG). Migrations are not rolled back."
+
+.PHONY: require-rollback-tag
+require-rollback-tag:
+	@test -n "$(_USER_TAG)" || { echo "Usage: make aws-backend-rollback TAG=<commit sha> (see: aws ecr describe-images --repository-name $(PROJECT)-backend)" >&2; exit 1; }
 
 .PHONY: aws-backend-outputs
 aws-backend-outputs: ## Show backend stack outputs (API URL, DB endpoint, ...)
@@ -369,6 +396,74 @@ aws-frontend-https-check: require-frontend-domain ## Check that https://FRONTEND
 	@echo "DNS: $$(dig +short $(FRONTEND_DOMAIN) | tr '\n' ' ')"
 	curl -fsS -o /dev/null -w "%{http_code} %{url_effective}\n" https://$(FRONTEND_DOMAIN)/
 
+##@ AWS backend custom domain (DOMAIN=example.com -> BACKEND_DOMAIN=api.example.com, optional)
+
+.PHONY: aws-backend-cert
+aws-backend-cert: require-backend-domain aws-check ## Request (or reuse) the ACM certificate for BACKEND_DOMAIN and set up DNS validation
+	@$(CERT_SH) request $(BACKEND_DOMAIN)
+
+.PHONY: aws-backend-cert-status
+aws-backend-cert-status: require-backend-domain ## Show the backend certificate status and its DNS validation record
+	@$(CERT_SH) status $(BACKEND_DOMAIN)
+
+.PHONY: aws-backend-https
+aws-backend-https: aws-backend-cert ## Put BACKEND_DOMAIN in front of the Lambda (API Gateway HTTP API), then rebuild the frontend against it
+	@$(CERT_SH) wait $(BACKEND_DOMAIN)
+	$(call clear_failed_stack,$(BACKEND_DOMAIN_STACK))
+	aws cloudformation deploy --stack-name $(BACKEND_DOMAIN_STACK) --template-file infra/backend-domain.yaml \
+	  --no-fail-on-empty-changeset --tags $(STACK_TAGS) \
+	  --parameter-overrides ProjectName=$(PROJECT) BackendFunctionName=$(BACKEND_FUNCTION) \
+	    DomainName=$(BACKEND_DOMAIN) CertificateArn=$(BACKEND_CERT_ARN) HostedZoneId=$(BACKEND_ZONE_ID)
+	@$(if $(BACKEND_ZONE_ID),,echo "Add at your DNS provider: CNAME $(BACKEND_DOMAIN) -> $(call backend_domain_output,RegionalDomainName)";)
+	@# VITE_API_URL is baked in at build time, so the SPA is rebuilt to call the new domain.
+	$(MAKE) --no-print-directory aws-frontend-publish
+
+.PHONY: aws-backend-https-check
+aws-backend-https-check: require-backend-domain ## Check that https://BACKEND_DOMAIN/api/health answers
+	@echo "DNS: $$(dig +short $(BACKEND_DOMAIN) | tr '\n' ' ')"
+	@code=$$(curl -sS -o /dev/null --max-time 60 -w "%{http_code}" https://$(BACKEND_DOMAIN)/api/health); \
+	echo "HTTP $$code https://$(BACKEND_DOMAIN)/api/health"; \
+	[ "$$code" = 200 ] || { echo "Not answering yet: DNS may still be propagating (check again in a few minutes)"; exit 1; }
+
+.PHONY: aws-backend-domain-destroy
+aws-backend-domain-destroy: aws-check ## Delete the api.<domain> stack (the function URL keeps working)
+	@read -p "Delete stack $(BACKEND_DOMAIN_STACK) in $(AWS_REGION)? [y/N] " ok && [ "$$ok" = y ]
+	aws cloudformation delete-stack --stack-name $(BACKEND_DOMAIN_STACK)
+	aws cloudformation wait stack-delete-complete --stack-name $(BACKEND_DOMAIN_STACK)
+	@echo "Run \`make aws-frontend-publish\` to rebuild the frontend against the function URL."
+
+##@ CI/CD (GitHub Actions deploys through an OIDC role; no stored AWS keys)
+
+.PHONY: aws-oidc-deploy
+aws-oidc-deploy: aws-check ## Create/update the GitHub OIDC deploy role (after the frontend stack exists; re-run if it is recreated)
+	$(call clear_failed_stack,$(OIDC_STACK))
+	@bucket="$(call frontend_output,BucketName)"; dist="$(call frontend_output,DistributionId)"; \
+	[ -n "$$bucket" ] && [ -n "$$dist" ] || { echo "Frontend stack not found: run \`make aws-frontend-deploy\` first"; exit 1; }; \
+	existing=$$(aws iam list-open-id-connect-providers \
+	  --query "OpenIDConnectProviderList[?ends_with(Arn,'/token.actions.githubusercontent.com')].Arn | [0]" \
+	  --output text | sed 's/^None$$//'); \
+	[ "$(call oidc_output,ProviderManagedByStack)" = true ] && existing=; \
+	aws cloudformation deploy --stack-name $(OIDC_STACK) --template-file infra/github-oidc.yaml \
+	  --capabilities CAPABILITY_NAMED_IAM --no-fail-on-empty-changeset --tags $(STACK_TAGS) \
+	  --parameter-overrides ProjectName=$(PROJECT) FrontendBucketName=$$bucket \
+	    FrontendDistributionId=$$dist ExistingOidcProviderArn=$$existing && \
+	role=$$(aws cloudformation describe-stacks --stack-name $(OIDC_STACK) \
+	  --query "Stacks[0].Outputs[?OutputKey=='DeployRoleArn'].OutputValue" --output text) && \
+	echo && echo "Deploy role: $$role" && \
+	echo "Store it as a repository variable (not a secret):" && \
+	echo "  gh variable set AWS_DEPLOY_ROLE_ARN --repo $(GITHUB_REPO) --body $$role"
+
+.PHONY: aws-oidc-outputs
+aws-oidc-outputs: ## Show the OIDC stack outputs (deploy role ARN, provider)
+	@aws cloudformation describe-stacks --stack-name $(OIDC_STACK) \
+	  --query "Stacks[0].Outputs[].[OutputKey, OutputValue]" --output table
+
+.PHONY: aws-oidc-destroy
+aws-oidc-destroy: aws-check ## Delete the deploy role stack (the account's GitHub OIDC provider is retained)
+	@read -p "Delete stack $(OIDC_STACK)? CI can no longer deploy afterwards [y/N] " ok && [ "$$ok" = y ]
+	aws cloudformation delete-stack --stack-name $(OIDC_STACK)
+	aws cloudformation wait stack-delete-complete --stack-name $(OIDC_STACK)
+
 ##@ AWS auth (Cognito user pool; Google sign-in once GOOGLE_CLIENT_ID/SECRET are set in .env)
 
 .PHONY: aws-cognito-deploy
@@ -416,7 +511,7 @@ aws-cognito-destroy: aws-check ## Delete the Cognito stack — ALL user accounts
 aws-deploy: aws-cognito-deploy aws-backend-deploy aws-frontend-deploy ## Deploy everything: Cognito, backend, then the frontend built with their IDs and URL
 
 .PHONY: aws-destroy
-aws-destroy: aws-frontend-destroy aws-backend-destroy aws-cognito-destroy ## Delete everything on AWS (each stack asks first)
+aws-destroy: aws-frontend-destroy aws-backend-domain-destroy aws-backend-destroy aws-cognito-destroy $(if $(DESTROY_OIDC),aws-oidc-destroy) ## Delete everything on AWS (each stack asks first; DESTROY_OIDC=1 also removes the CI role)
 
 ##@ Help
 
