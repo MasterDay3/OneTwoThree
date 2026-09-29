@@ -51,7 +51,7 @@ environments and caches are in `.gitignore`).
 | Folder | Purpose |
 | --- | --- |
 | `.github/` | GitHub configuration; holds only CI workflows. |
-| `.github/workflows/` | `code-style.yml`: Ruff on `back/`, ESLint + Prettier + `tsc` on `front/`, cfn-lint on `infra/*.yaml`. Runs on pushes to `main` and on pull requests. It runs no test suites and deploys nothing. |
+| `.github/workflows/` | `code-style.yml`: Ruff on `back/`, ESLint + Prettier + `tsc` on `front/`, cfn-lint on `infra/*.yaml`, and the `infra/tests` suite; runs on pull requests and as the first stage of `deploy.yml`. `deploy.yml`: on every push to `main`, lint + backend and frontend tests, then `make deploy-backend` and `make deploy-frontend` with short-lived AWS credentials from GitHub OIDC. |
 | `back/` | Backend: FastAPI app, Alembic migrations, tests, `pyproject.toml` + `uv.lock`, `Dockerfile` (Compose) and `Dockerfile.lambda` (AWS Lambda image). |
 | `back/app/` | The Python package `app`: `main.py` (FastAPI app, CORS, 404/409 error handlers), `config.py` (settings from env), `db.py` (engine, session), `models.py` (SQLAlchemy tables), `schemas.py` (Pydantic request/response models = the API contract), `auth.py` (Cognito ID-token check), `seed.py` (sample participants), `lambda_handler.py` (Mangum entry point + `migrate` action). |
 | `back/app/routers/` | HTTP layer only: one module per resource (`health`, `me`, `meetings`, `participants`), mounted under `/api` in `main.py`. |
@@ -59,7 +59,7 @@ environments and caches are in `.gitignore`).
 | `back/alembic/` | Alembic environment (`env.py`, `script.py.mako`). Alembic owns the database schema; the app never creates tables itself. |
 | `back/alembic/versions/` | Ordered migrations: `0001_initial`, `0002_meeting_times`, `0003_users`. |
 | `back/tests/` | Backend pytest suite (`test_api.py`, `test_auth.py`) against a real PostgreSQL database named by `TEST_DATABASE_URL`. Excluded from the Docker build context by `back/.dockerignore`. |
-| `docs/` | Course/lab documents: `PRD.md` (requirements) and `lab2-implementation-plan.md`. |
+| `docs/` | Course/lab documents: `PRD.md` (requirements), `lab2-implementation-plan.md`, and `lab2-discussion.md` (answers to the lab's discussion questions). |
 | `docs/qa/` | QA test cases derived from the use cases. |
 | `docs/use-cases/` | Use-case scenarios for the lab features. |
 | `front/` | Frontend: Vite + React + TypeScript + Tailwind + shadcn/ui; `package.json` + `package-lock.json`, lint/format/TS config, `Dockerfile` (build with Node, serve with nginx) and `nginx.conf`. |
@@ -71,8 +71,8 @@ environments and caches are in `.gitignore`).
 | `front/src/hooks/` | TanStack Query hooks: `useMeetings`, `useParticipants`, `useMe`. |
 | `front/src/lib/` | Non-UI modules: `api.ts` (typed fetch wrapper, adds the Bearer token), `auth.ts` (Cognito sign-in/up, session, Google via Hosted UI + PKCE), `calendar.ts` (date helpers, overlap layout), `participants.ts`, `utils.ts`. |
 | `front/src/test/` | Vitest + Testing Library tests and their setup. |
-| `infra/` | CloudFormation templates, one stack each: `cognito.yaml`, `backend-ecr.yaml`, `backend.yaml` (VPC, Aurora Serverless v2, Lambda + function URL), `frontend.yaml` (S3 + CloudFront + WAF); `backend.params.example.env` (optional parameter overrides). |
-| `infra/scripts/` | `cert.sh`: ACM certificate and DNS helper for the frontend's custom domain, called by the `Makefile`. |
+| `infra/` | CloudFormation templates, one stack each: `cognito.yaml`, `backend-ecr.yaml`, `backend.yaml` (VPC, Aurora Serverless v2, Lambda + function URL), `frontend.yaml` (S3 + CloudFront + WAF), `backend-domain.yaml` (API Gateway HTTP API on `api.<domain>` in front of the Lambda), `github-oidc.yaml` (GitHub OIDC provider + the CI deploy role); `backend.params.example.env` (optional parameter overrides). |
+| `infra/scripts/` | `cert.sh`: ACM certificate and DNS helper for the custom domains (`app.` and `api.`), called by the `Makefile`. |
 | `infra/tests/` | Python checks for the repository's non-application parts (this document, the `Makefile`, the templates). |
 
 **Root files.** `compose.yaml` (local stack), `Makefile` (every local and AWS workflow; `make help`
@@ -361,8 +361,13 @@ must earn its place in this file.
 
 ## AWS in one paragraph
 
-Everything deploys to `us-east-1` with CloudFormation through the `Makefile` (`make aws-deploy` =
-Cognito, then backend, then frontend). The backend runs as a container image on Lambda behind a
-public function URL, with Aurora Serverless v2 PostgreSQL in private subnets; the frontend is a
-private S3 bucket behind CloudFront with a WAF web ACL. Details, costs and the optional custom
-domain are in `README.md`; this section will be refreshed when the deployment pipeline changes.
+Everything deploys to `us-east-1`, and the `Makefile` is the deploy contract. **Infrastructure**
+(CloudFormation stacks: `make aws-deploy`, the `*-stack`, `*-https` and `aws-oidc-deploy` targets) is
+changed deliberately from a laptop. **Code** is rolled out by `make deploy-backend` (build the Lambda
+image, push it to ECR tagged with the commit SHA, point the Lambda at it, run migrations) and
+`make deploy-frontend` (build the SPA, upload to S3, invalidate CloudFront). CI runs exactly those two
+targets on every push to `main`, with credentials from GitHub OIDC (`infra/github-oidc.yaml`; trust
+limited to `repo:MasterDay3/OneTwoThree:ref:refs/heads/main`). The backend runs on Lambda + Aurora
+Serverless v2 (not ECS/ALB) and is served on `https://api.<domain>` through an API Gateway HTTP API,
+with the function URL kept as a fallback; the frontend is served on `https://app.<domain>` by
+CloudFront from a private S3 bucket. Setup steps, costs and teardown are in `README.md`.
