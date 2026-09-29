@@ -59,9 +59,7 @@ environments and caches are in `.gitignore`).
 | `back/alembic/` | Alembic environment (`env.py`, `script.py.mako`). Alembic owns the database schema; the app never creates tables itself. |
 | `back/alembic/versions/` | Ordered migrations: `0001_initial`, `0002_meeting_times`, `0003_users`. |
 | `back/tests/` | Backend pytest suite (`test_api.py`, `test_auth.py`) against a real PostgreSQL database named by `TEST_DATABASE_URL`. Excluded from the Docker build context by `back/.dockerignore`. |
-| `docs/` | Course/lab documents: `PRD.md` (requirements), `lab2-implementation-plan.md`, and `lab2-discussion.md` (answers to the lab's discussion questions). |
-| `docs/qa/` | QA test cases derived from the use cases. |
-| `docs/use-cases/` | Use-case scenarios for the lab features. |
+| `docs/` | `lab2-discussion.md`: answers to the lab's discussion questions, grounded in this repository's files. |
 | `front/` | Frontend: Vite + React + TypeScript + Tailwind + shadcn/ui; `package.json` + `package-lock.json`, lint/format/TS config, `Dockerfile` (build with Node, serve with nginx) and `nginx.conf`. |
 | `front/src/` | App entry (`main.tsx`, `App.tsx` with the routes), `types.ts` (TypeScript mirror of the API schemas), global CSS. |
 | `front/src/pages/` | One component per route: `LoginPage` (`/`), `SignUpPage` (`/signup`), `ConfirmPage` (`/confirm`), `AuthCallbackPage` (`/auth/callback`), `HomePage` (`/home`, the calendar; needs sign-in). |
