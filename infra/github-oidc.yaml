@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Meetings App - GitHub Actions OIDC identity provider and a least-privilege deploy role that only
+  pushes to main of MasterDay3/OneTwoThree can assume. Deploy after the backend and frontend stacks:
+  the role's policy is scoped to their concrete ECR repository, function, bucket and distribution.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: meetings
+    Description: Name prefix for all resources (must match the other stacks' ProjectName).
+  ExistingOidcProviderArn:
+    Type: String
+    Default: ""
+    Description: >-
+      ARN of an existing token.actions.githubusercontent.com provider in this account (an account can
+      have only one per URL). Empty creates it here; the Makefile fills this in when one already exists.
+  FrontendBucketName:
+    Type: String
+    Description: The frontend stack's BucketName output (the SPA bucket the role may sync to).
+  FrontendDistributionId:
+    Type: String
+    Description: The frontend stack's DistributionId output (the distribution the role may invalidate).
+
+Conditions:
+  CreateOidcProvider: !Equals [!Ref ExistingOidcProviderArn, ""]
+
+Resources:
+  # Kept when the stack is deleted: the provider is account-wide and may be shared by other roles.
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidcProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+
+  # =====================================================================
+  # Deploy role assumed by the GitHub Actions workflow (no long-lived keys anywhere).
+  #
+  # Trust: only a token GitHub issued for a push/run on refs/heads/main of MasterDay3/OneTwoThree,
+  # minted for the STS audience. Both claims are compared with StringEquals against literals, so
+  # other branches, tags, pull requests, forks (a different owner in "repo:<owner>/<repo>") and
+  # unrelated repositories can never match; a wildcard pattern match would widen that. A deploy
+  # job that declares a GitHub `environment:` gets sub "repo:...:environment:<name>" and is denied
+  # too (by design; see FR-17).
+  #
+  # Permissions: exactly what deploy-backend / deploy-frontend / aws-backend-rollback call, each
+  # scoped by ARN. The only unscoped resource is ecr:GetAuthorizationToken, which IAM cannot scope.
+  # No IAM, Cognito, ACM or Route 53 access and no stack mutation: those stay laptop-only.
+  # =====================================================================
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+      RoleName: !Sub ${ProjectName}-github-deploy
+      Description: Assumed by GitHub Actions on main of MasterDay3/OneTwoThree to deploy the app.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "token.actions.githubusercontent.com:sub": "repo:MasterDay3/OneTwoThree:ref:refs/heads/main"
+                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+      Policies:
+        - PolicyName: deploy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # docker login to ECR; this action has no resource-level scoping.
+              - Sid: EcrAuth
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: "*"
+              # Push the backend image (and look it up again for a rollback).
+              - Sid: EcrPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:DescribeImages
+                Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-backend
+              # Point the function at the new image, wait for it, run migrations (not its URL).
+              - Sid: LambdaDeploy
+                Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionCode
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                  - lambda:InvokeFunction
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-backend
+              # aws s3 sync --delete of the built SPA.
+              - Sid: S3List
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::${FrontendBucketName}
+              - Sid: S3Objects
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${FrontendBucketName}/*
+              - Sid: CloudFrontInvalidate
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                Resource: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${FrontendDistributionId}
+              # Read-only stack output lookups (stack_output in the Makefile).
+              - Sid: CfnRead
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                Resource:
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}-backend-ecr/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}-backend/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}-backend-domain/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}-frontend/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}-cognito/*
+
+Outputs:
+  DeployRoleArn:
+    Description: Set as the GitHub repository variable AWS_DEPLOY_ROLE_ARN (a variable, not a secret).
+    Value: !GetAtt GitHubDeployRole.Arn
+  OidcProviderArn:
+    Description: The GitHub OIDC provider the role trusts (created here or passed in).
+    Value: !If [CreateOidcProvider, !Ref GitHubOidcProvider, !Ref ExistingOidcProviderArn]
+  ProviderManagedByStack:
+    Description: >-
+      "true" when this stack created (and manages) the provider; the Makefile keeps passing an empty
+      ExistingOidcProviderArn on re-deploys so the provider is not orphaned.
+    Value: !If [CreateOidcProvider, "true", "false"]
