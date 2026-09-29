@@ -3,6 +3,8 @@
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
+# Prerequisite chains (deploy-backend: push → update → migrate) must run in order even under -j.
+.NOTPARALLEL:
 
 # .env holds compose settings and, for local use only, optional static AWS keys. Only the keys defined
 # in .env are exported. AWS credentials from the environment (`aws sso login` / AWS_PROFILE, exported
@@ -34,15 +36,18 @@ export AWS_DEFAULT_REGION := $(AWS_REGION)
 
 # arm64 (Graviton, cheaper; native on Apple Silicon) or amd64
 ARCH        ?= arm64
-# Lambda only picks up a new image when its URI changes, so uncommitted builds get a unique tag.
+# Image tag = the full commit SHA (CI passes TAG=$${{ github.sha }}), so the running image names its commit
+# and a rollback is "deploy the previous tag". Lambda only picks up a new image when its URI changes,
+# so uncommitted builds get a unique -dirty-<timestamp> suffix. Never `latest`.
 ifndef TAG
-TAG         := $(shell git describe --always --dirty=-dirty-$$(date +%Y%m%d%H%M%S) 2>/dev/null || date +%Y%m%d%H%M%S)
+TAG         := $(shell sha=$$(git rev-parse HEAD 2>/dev/null) && { git diff --quiet HEAD 2>/dev/null && echo $$sha || echo $$sha-dirty-$$(date +%Y%m%d%H%M%S); } || date +%Y%m%d%H%M%S)
 endif
 
 BACKEND_ECR_STACK := $(PROJECT)-backend-ecr
 BACKEND_STACK     := $(PROJECT)-backend
 BACKEND_FUNCTION  := $(PROJECT)-backend
 BACKEND_PARAMS    := infra/backend.params.env
+BACKEND_DOMAIN_STACK := $(PROJECT)-backend-domain
 FRONTEND_STACK    := $(PROJECT)-frontend
 COGNITO_STACK     := $(PROJECT)-cognito
 # Every resource gets this tag (in the templates and as a stack tag).
@@ -79,7 +84,10 @@ BACKEND_PARAMS_ARGS = $(shell [ -f $(BACKEND_PARAMS) ] && grep -v -e '^[[:space:
 backend_output  = $(call stack_output,$(BACKEND_STACK),$(1))
 frontend_output = $(call stack_output,$(FRONTEND_STACK),$(1))
 cognito_output  = $(call stack_output,$(COGNITO_STACK),$(1))
+backend_domain_output = $(call stack_output,$(BACKEND_DOMAIN_STACK),$(1))
 API_URL          = $(call backend_output,ApiUrl)
+# The SPA calls https://api.<domain>/ once the backend-domain stack exists, else the function URL.
+FRONTEND_API_URL = $(or $(call backend_domain_output,ApiUrl),$(API_URL))
 FRONTEND_ORIGINS = $(call frontend_output,SiteOrigins)
 CORS_ORIGINS_AWS = $(CORS_LOCAL)$(if $(FRONTEND_ORIGINS),$(COMMA)$(FRONTEND_ORIGINS))
 # Cognito may redirect back (Google sign-in) to every origin the API allows.
@@ -177,6 +185,15 @@ aws-check: ## Verify the AWS credentials work (SSO/profile or exported keys; sta
 	@aws sts get-caller-identity --query '[Account, Arn]' --output text \
 	  || { echo "AWS credentials missing/invalid/expired: run \`aws sso login\` / export credentials (CI: OIDC), or set static keys in .env for local use only"; exit 1; }
 
+# ---- Deploy contract: what CI runs on every push to main, and what you can run yourself ----
+# Code and assets only. Infrastructure (the *-stack targets) is changed deliberately from a laptop.
+
+.PHONY: deploy-backend
+deploy-backend: aws-check aws-backend-push aws-backend-update-code aws-backend-migrate ## Roll out backend code: build + push image $(TAG), update the Lambda, migrate (never CloudFormation)
+
+.PHONY: deploy-frontend
+deploy-frontend: aws-check aws-frontend-publish ## Roll out the frontend: build, upload to S3, invalidate CloudFront (never CloudFormation)
+
 .PHONY: aws-backend-deploy
 aws-backend-deploy: aws-check aws-backend-ecr aws-backend-push aws-backend-stack aws-backend-migrate ## Deploy backend: ECR, image, Aurora, Lambda + function URL, migrations
 	@echo
@@ -195,9 +212,9 @@ aws-backend-login: ## Log Docker in to ECR
 	aws ecr get-login-password | docker login --username AWS --password-stdin $(ECR_REGISTRY)
 
 .PHONY: aws-backend-push
-aws-backend-push: aws-backend-login ## Build the Lambda image for linux/$(ARCH) and push it with tag $(TAG)
+aws-backend-push: aws-backend-login ## Build the Lambda image for linux/$(ARCH) and push it with tag $(TAG) (the commit SHA)
 	docker buildx build --platform linux/$(ARCH) --provenance=false -f back/Dockerfile.lambda \
-	  -t $(ECR_URI):$(TAG) -t $(ECR_URI):latest --push back
+	  -t $(ECR_URI):$(TAG) --push back
 
 .PHONY: aws-backend-stack
 aws-backend-stack: ## Create/update the backend stack (VPC, Aurora, Lambda) with image tag $(TAG); KEEP_IMAGE=1 keeps the current image
@@ -212,6 +229,14 @@ aws-backend-stack: ## Create/update the backend stack (VPC, Aurora, Lambda) with
 	    Architecture=$(LAMBDA_ARCH) "CorsOrigins=$(CORS_ORIGINS_AWS)" \
 	    CognitoUserPoolId=$(COGNITO_POOL_ID) CognitoClientId=$(COGNITO_CLIENT) "CognitoJwks=$$jwks" \
 	    $(BACKEND_PARAMS_ARGS)
+
+.PHONY: aws-backend-update-code
+aws-backend-update-code: ## Point the Lambda at image tag $(TAG) and wait until it is live (no CloudFormation)
+	@test -n "$(ECR_URI)" || { echo "ECR repository not found: run \`make aws-backend-ecr\` first"; exit 1; }
+	aws lambda wait function-updated-v2 --function-name $(BACKEND_FUNCTION)
+	aws lambda update-function-code --function-name $(BACKEND_FUNCTION) --image-uri $(ECR_URI):$(TAG) \
+	  --query CodeSha256 --output text
+	aws lambda wait function-updated-v2 --function-name $(BACKEND_FUNCTION)
 
 .PHONY: aws-backend-migrate
 aws-backend-migrate: ## Run Alembic migrations (and seeding) inside the Lambda
@@ -265,9 +290,11 @@ aws-frontend-stack: ## Create/update the frontend stack (S3, CloudFront + WAF on
 	  --parameter-overrides ProjectName=$(PROJECT) PricingPlan=$(CLOUDFRONT_PLAN) \
 	    $(if $(DETACH_DOMAIN),CertificateArn= DomainName= HostedZoneId=,$(FRONTEND_DOMAIN_ARGS))
 
+# Upload order: new hashed assets first, then the index.html that references them, and only then
+# delete old chunks, so a browser still holding the previous index.html never requests a missing file.
 .PHONY: aws-frontend-publish
-aws-frontend-publish: ## Build the SPA with VITE_API_URL=<function URL>, upload it, invalidate CloudFront
-	@api="$(API_URL)"; bucket="$(call frontend_output,BucketName)"; dist="$(call frontend_output,DistributionId)"; \
+aws-frontend-publish: ## Build the SPA with VITE_API_URL=<api.<domain> or function URL>, upload it, invalidate CloudFront
+	@api="$(FRONTEND_API_URL)"; bucket="$(call frontend_output,BucketName)"; dist="$(call frontend_output,DistributionId)"; \
 	[ -n "$$api" ] || { echo "Backend not deployed: run \`make aws-backend-deploy\` first"; exit 1; }; \
 	[ -n "$$bucket" ] || { echo "Frontend stack not found: run \`make aws-frontend-stack\` first"; exit 1; }; \
 	[ -n "$(COGNITO_POOL_ID)" ] || { echo "Cognito not deployed: run \`make aws-cognito-deploy\` first"; exit 1; }; \
@@ -276,9 +303,11 @@ aws-frontend-publish: ## Build the SPA with VITE_API_URL=<function URL>, upload 
 	  VITE_COGNITO_REGION=$(AWS_REGION) VITE_COGNITO_USER_POOL_ID=$(COGNITO_POOL_ID) \
 	  VITE_COGNITO_CLIENT_ID=$(COGNITO_CLIENT) VITE_COGNITO_DOMAIN=$(call cognito_output,HostedUiDomain) \
 	  VITE_COGNITO_GOOGLE=$(call cognito_output,GoogleEnabled) npm run build) && \
-	aws s3 sync front/dist "s3://$$bucket" --delete --exclude index.html \
+	aws s3 sync front/dist "s3://$$bucket" --exclude index.html \
 	  --cache-control "public,max-age=31536000,immutable" && \
 	aws s3 cp front/dist/index.html "s3://$$bucket/index.html" --cache-control "no-cache" && \
+	aws s3 sync front/dist "s3://$$bucket" --delete --exclude index.html \
+	  --cache-control "public,max-age=31536000,immutable" && \
 	aws cloudfront create-invalidation --distribution-id "$$dist" --paths "/*" \
 	  --query "Invalidation.Status" --output text
 
