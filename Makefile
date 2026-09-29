@@ -4,10 +4,23 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-# .env holds compose settings and AWS credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
-# optionally AWS_SESSION_TOKEN). Only the keys defined in .env are exported.
--include .env
+# .env holds compose settings and, for local use only, optional static AWS keys. Only the keys defined
+# in .env are exported. AWS credentials from the environment (`aws sso login` / AWS_PROFILE, exported
+# session keys, CI's OIDC role) always win: if any of the four below is set in the environment, .env
+# supplies none of them. The wildcard keeps make from creating .env just because it is included.
+AWS_CRED_VARS := AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
+$(foreach v,$(AWS_CRED_VARS),$(eval _env_$(v) := $$($(v))))
+-include $(wildcard .env)
 export $(shell sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' .env 2>/dev/null)
+AWS_CREDS_FROM_ENV := $(if $(strip $(foreach v,$(AWS_CRED_VARS),$(_env_$(v)))),1)
+ifdef AWS_CREDS_FROM_ENV
+$(foreach v,$(AWS_CRED_VARS),$(eval $(v) := $$(_env_$(v))))
+$(foreach v,$(AWS_CRED_VARS),$(eval $(if $(_env_$(v)),export,unexport) $(v)))
+endif
+# Defaults for a .env that `start`/`test-back` create during this run (make only reads .env at startup).
+POSTGRES_USER     ?= meetings
+POSTGRES_PASSWORD ?= meetings
+POSTGRES_DB       ?= meetings
 
 # ---------------------------------------------------------------------------
 # Settings (override on the command line, e.g. `make aws-deploy ARCH=amd64`)
@@ -39,8 +52,11 @@ STACK_TAGS        := PROJECT_NAME=$(PROJECT)
 # accounts, or 3 free plans already in use).
 CLOUDFRONT_PLAN   ?= FREE
 
-# Optional custom domain for the frontend (`make aws-frontend-https`); empty = CloudFront domain only.
-FRONTEND_DOMAIN   ?= onetwothree.dobosevych.com
+# Optional custom domain: DOMAIN=example.com serves the site at app.example.com (`make aws-frontend-https`)
+# and the API at api.example.com; each can be overridden on its own. Empty = CloudFront/AWS domains only.
+DOMAIN            ?=
+FRONTEND_DOMAIN   ?= $(if $(DOMAIN),app.$(DOMAIN))
+BACKEND_DOMAIN    ?= $(if $(DOMAIN),api.$(DOMAIN))
 CERT_SH           := PROJECT_NAME=$(PROJECT) infra/scripts/cert.sh
 # Browser origins the API always allows besides the frontend's (local development).
 CORS_LOCAL        ?= http://localhost:3000,http://localhost:5173
@@ -49,8 +65,10 @@ LAMBDA_ARCH  = $(if $(filter arm64,$(ARCH)),arm64,x86_64)
 HASH        := \#
 COMMA       := ,
 # $(shell) does not inherit exported variables in GNU make < 4.4 (macOS ships 3.81),
-# so AWS lookups inside $(shell) load .env themselves.
-LOAD_ENV    := set -a; [ -f .env ] && . ./.env; set +a; export AWS_REGION=$(AWS_REGION) AWS_DEFAULT_REGION=$(AWS_REGION);
+# so AWS lookups inside $(shell) load .env themselves — minus its AWS credential lines when the
+# environment has credentials (eval, not `. <(...)`: bash 3.2 can't source a process substitution).
+ENV_FILE_SOURCE := $(if $(AWS_CREDS_FROM_ENV),eval "$$(grep -vE '^[[:space:]]*(export[[:space:]]+)?(AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AWS_PROFILE)=' .env)",. ./.env)
+LOAD_ENV    := set -a; [ -f .env ] && $(ENV_FILE_SOURCE); set +a; export AWS_REGION=$(AWS_REGION) AWS_DEFAULT_REGION=$(AWS_REGION);
 AWS_SHELL   := $(LOAD_ENV) aws
 # Recursive (=) so they are looked up only when a recipe needs them, after the stacks exist.
 stack_output = $(shell $(AWS_SHELL) cloudformation describe-stacks --stack-name $(1) \
@@ -137,6 +155,10 @@ test-back: .env ## Backend tests (starts the db container, creates meetings_test
 test-front: ## Frontend tests
 	cd front && npm test
 
+.PHONY: test-infra
+test-infra: ## Infra tests: Makefile, CloudFormation templates, scripts (stubbed, no AWS calls)
+	uvx --with pyyaml pytest infra/tests -q
+
 .PHONY: lint
 lint: ## Code style checks (same as CI)
 	cd back && uv run ruff check . && uv run ruff format --check .
@@ -151,9 +173,9 @@ format: ## Auto-format backend and frontend
 ##@ AWS backend (Lambda + Aurora Serverless v2 via CloudFormation)
 
 .PHONY: aws-check
-aws-check: ## Verify AWS credentials from .env work
+aws-check: ## Verify the AWS credentials work (SSO/profile or exported keys; static keys in .env for local use only)
 	@aws sts get-caller-identity --query '[Account, Arn]' --output text \
-	  || { echo "AWS credentials missing/invalid: set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in .env"; exit 1; }
+	  || { echo "AWS credentials missing/invalid/expired: run \`aws sso login\` / export credentials (CI: OIDC), or set static keys in .env for local use only"; exit 1; }
 
 .PHONY: aws-backend-deploy
 aws-backend-deploy: aws-check aws-backend-ecr aws-backend-push aws-backend-stack aws-backend-migrate ## Deploy backend: ECR, image, Aurora, Lambda + function URL, migrations
@@ -236,12 +258,12 @@ aws-frontend-deploy: aws-check aws-frontend-stack aws-frontend-publish aws-front
 	@echo "Site: $(call frontend_output,SiteUrl)"
 
 .PHONY: aws-frontend-stack
-aws-frontend-stack: ## Create/update the frontend stack (S3, CloudFront + WAF on the Free plan, custom domain once its certificate is issued)
+aws-frontend-stack: ## Create/update the frontend stack (S3, CloudFront + WAF on the Free plan, custom domain once its certificate is issued; an attached domain is kept, DETACH_DOMAIN=1 removes it)
 	$(call clear_failed_stack,$(FRONTEND_STACK))
 	aws cloudformation deploy --stack-name $(FRONTEND_STACK) --template-file infra/frontend.yaml \
 	  --no-fail-on-empty-changeset --tags $(STACK_TAGS) \
 	  --parameter-overrides ProjectName=$(PROJECT) PricingPlan=$(CLOUDFRONT_PLAN) \
-	    $(or $(FRONTEND_DOMAIN_ARGS),CertificateArn= DomainName= HostedZoneId=)
+	    $(if $(DETACH_DOMAIN),CertificateArn= DomainName= HostedZoneId=,$(FRONTEND_DOMAIN_ARGS))
 
 .PHONY: aws-frontend-publish
 aws-frontend-publish: ## Build the SPA with VITE_API_URL=<function URL>, upload it, invalidate CloudFront
@@ -277,14 +299,22 @@ aws-frontend-destroy: aws-check ## Empty the bucket and delete the frontend stac
 	aws cloudformation delete-stack --stack-name $(FRONTEND_STACK)
 	aws cloudformation wait stack-delete-complete --stack-name $(FRONTEND_STACK)
 
-##@ AWS frontend custom domain (FRONTEND_DOMAIN, optional)
+##@ AWS frontend custom domain (DOMAIN=example.com -> FRONTEND_DOMAIN=app.example.com, optional)
+
+# Guards: domain targets stop here, before any AWS call, when their domain is empty.
+.PHONY: require-frontend-domain require-backend-domain
+require-frontend-domain:
+	@test -n "$(FRONTEND_DOMAIN)" || { echo "FRONTEND_DOMAIN is empty: set DOMAIN=example.com (or FRONTEND_DOMAIN=...)" >&2; exit 1; }
+
+require-backend-domain:
+	@test -n "$(BACKEND_DOMAIN)" || { echo "BACKEND_DOMAIN is empty: set DOMAIN=example.com (or BACKEND_DOMAIN=...)" >&2; exit 1; }
 
 .PHONY: aws-frontend-cert
-aws-frontend-cert: aws-check ## Request (or reuse) the ACM certificate for FRONTEND_DOMAIN (us-east-1) and set up DNS validation
+aws-frontend-cert: require-frontend-domain aws-check ## Request (or reuse) the ACM certificate for FRONTEND_DOMAIN (us-east-1) and set up DNS validation
 	@$(CERT_SH) request $(FRONTEND_DOMAIN)
 
 .PHONY: aws-frontend-cert-status
-aws-frontend-cert-status: ## Show the certificate status and its DNS validation record
+aws-frontend-cert-status: require-frontend-domain ## Show the certificate status and its DNS validation record
 	@$(CERT_SH) status $(FRONTEND_DOMAIN)
 
 .PHONY: aws-frontend-https
@@ -295,7 +325,7 @@ aws-frontend-https: aws-frontend-cert ## Attach FRONTEND_DOMAIN: wait for the ce
 	@$(MAKE) --no-print-directory aws-frontend-dns
 
 .PHONY: aws-frontend-dns
-aws-frontend-dns: ## Show the DNS record that points FRONTEND_DOMAIN at CloudFront
+aws-frontend-dns: require-frontend-domain ## Show the DNS record that points FRONTEND_DOMAIN at CloudFront
 	@if [ -n "$(FRONTEND_ZONE_ID)" ]; then \
 	  echo "Route 53 alias $(FRONTEND_DOMAIN) -> CloudFront is managed by stack $(FRONTEND_STACK) (zone $(FRONTEND_ZONE_ID))."; \
 	else \
@@ -306,7 +336,7 @@ aws-frontend-dns: ## Show the DNS record that points FRONTEND_DOMAIN at CloudFro
 	@echo; echo "Site: $(call frontend_output,SiteUrl)   (check: make aws-frontend-https-check)"
 
 .PHONY: aws-frontend-https-check
-aws-frontend-https-check: ## Check that https://FRONTEND_DOMAIN answers
+aws-frontend-https-check: require-frontend-domain ## Check that https://FRONTEND_DOMAIN answers
 	@echo "DNS: $$(dig +short $(FRONTEND_DOMAIN) | tr '\n' ' ')"
 	curl -fsS -o /dev/null -w "%{http_code} %{url_effective}\n" https://$(FRONTEND_DOMAIN)/
 
