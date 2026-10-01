@@ -54,6 +54,13 @@ def test_health_is_public(client: TestClient):
     assert client.get("/api/health").status_code == 200
 
 
+def test_root_redirects_to_the_api_docs_without_a_token(client: TestClient):
+    response = client.get("/", follow_redirects=False)
+
+    assert response.status_code in (302, 307)
+    assert response.headers["location"] == "/api/docs"
+
+
 def test_api_requires_a_token(client: TestClient):
     for path in ("/api/meetings", "/api/participants", "/api/me"):
         response = client.get(path)
