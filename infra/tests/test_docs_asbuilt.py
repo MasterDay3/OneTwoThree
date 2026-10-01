@@ -79,7 +79,7 @@ def test_discussion_is_honest_about_lambda_and_names_real_resources(repo_root):
     """TC-15.4–15.7."""
     text = _read(repo_root, "docs/lab2-discussion.md")
     assert "Lambda + Aurora Serverless v2, not ECS/ALB" in text
-    assert "repo:MasterDay3/OneTwoThree:ref:refs/heads/main" in text
+    assert "repo:MasterDay3@71492385/OneTwoThree@1394638106:ref:refs/heads/main" in text
     assert "infra/github-oidc.yaml" in text and "infra/backend-domain.yaml" in text
     assert "aws-destroy" in text and "DESTROY_OIDC=1" in text
     assert "last 5" in text and "migrations are never rolled back" in text.replace("\n", " ")

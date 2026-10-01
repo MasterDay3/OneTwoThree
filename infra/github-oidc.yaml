@@ -50,6 +50,10 @@ Resources:
   # job that declares a GitHub `environment:` gets sub "repo:...:environment:<name>" and is denied
   # too (by design; see FR-17).
   #
+  # The repository uses GitHub's immutable subject format ("repo:<owner>@<owner id>/<repo>@<repo id>",
+  # see `gh api repos/MasterDay3/OneTwoThree/actions/oidc/customization/sub`), so a deleted and
+  # re-created account or repository with the same names can't match either.
+  #
   # Permissions: exactly what deploy-backend / deploy-frontend / aws-backend-rollback call, each
   # scoped by ARN. The only unscoped resource is ecr:GetAuthorizationToken, which IAM cannot scope.
   # No IAM, Cognito, ACM or Route 53 access and no stack mutation: those stay laptop-only.
@@ -71,7 +75,7 @@ Resources:
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
               StringEquals:
-                "token.actions.githubusercontent.com:sub": "repo:MasterDay3/OneTwoThree:ref:refs/heads/main"
+                "token.actions.githubusercontent.com:sub": "repo:MasterDay3@71492385/OneTwoThree@1394638106:ref:refs/heads/main"
                 "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
       Policies:
         - PolicyName: deploy
