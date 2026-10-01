@@ -165,3 +165,27 @@ def test_detach_domain_is_documented_in_help(sandbox):
     result = sandbox.run("help")
 
     assert "DETACH_DOMAIN=1" in result.stdout
+
+
+# --- api.<domain> CNAME hint ------------------------------------------------------------------
+
+
+def test_backend_https_reads_the_api_cname_target_after_creating_the_stack(sandbox):
+    """The CNAME target is looked up once the domain stack exists, not while make expands the recipe."""
+    sandbox.stub("aws", match=["acm", "list-certificates"], stdout=CERT_ARN)
+    sandbox.stub("aws", match=["acm", "describe-certificate"], stdout="ISSUED")
+    sandbox.stub(
+        "aws",
+        match=["describe-stacks", "meetings-backend-domain", "RegionalDomainName"],
+        stdout="d-abc.execute-api.us-east-1.amazonaws.com",
+    )
+
+    result = sandbox.run("aws-backend-https", vars={"DOMAIN": "ex.com"})
+
+    argvs = [" ".join(c["argv"]) for c in sandbox.calls("aws")]
+    deploy = next(
+        i for i, a in enumerate(argvs) if a.startswith("cloudformation deploy") and "backend-domain" in a
+    )
+    lookups = [i for i, a in enumerate(argvs) if "RegionalDomainName" in a]
+    assert lookups and min(lookups) > deploy, "target must be read after the stack is deployed"
+    assert "CNAME api.ex.com -> d-abc.execute-api.us-east-1.amazonaws.com" in result.stdout

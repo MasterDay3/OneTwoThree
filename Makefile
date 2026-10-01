@@ -446,7 +446,10 @@ aws-backend-https: aws-backend-cert ## Put BACKEND_DOMAIN in front of the Lambda
 	  --no-fail-on-empty-changeset --tags $(STACK_TAGS) \
 	  --parameter-overrides ProjectName=$(PROJECT) BackendFunctionName=$(BACKEND_FUNCTION) \
 	    DomainName=$(BACKEND_DOMAIN) CertificateArn=$(BACKEND_CERT_ARN) HostedZoneId=$(BACKEND_ZONE_ID)
-	@$(if $(BACKEND_ZONE_ID),,echo "Add at your DNS provider: CNAME $(BACKEND_DOMAIN) -> $(call backend_domain_output,RegionalDomainName)";)
+	@# Read at run time: make expands the whole recipe before the stack above exists.
+	@$(if $(BACKEND_ZONE_ID),,echo "Add at your DNS provider: CNAME $(BACKEND_DOMAIN) -> $$(aws cloudformation describe-stacks \
+	  --stack-name $(BACKEND_DOMAIN_STACK) --query "Stacks[0].Outputs[?OutputKey=='RegionalDomainName'].OutputValue" \
+	  --output text)";)
 	@# VITE_API_URL is baked in at build time, so the SPA is rebuilt to call the new domain.
 	$(MAKE) --no-print-directory aws-frontend-publish
 
