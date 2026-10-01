@@ -48,6 +48,11 @@ endif
 BACKEND_ECR_STACK := $(PROJECT)-backend-ecr
 BACKEND_STACK     := $(PROJECT)-backend
 BACKEND_FUNCTION  := $(PROJECT)-backend
+# Aurora Serverless v2 with express configuration (`make aws-db`): the only Aurora the AWS Free plan allows.
+DB_CLUSTER        := $(PROJECT)-db
+DB_MIN_ACU        ?= 0
+DB_MAX_ACU        ?= 1
+DB_AUTO_PAUSE     ?= 300
 BACKEND_PARAMS    := infra/backend.params.env
 BACKEND_DOMAIN_STACK := $(PROJECT)-backend-domain
 OIDC_STACK        := $(PROJECT)-github-oidc
@@ -86,6 +91,8 @@ ECR_URI      = $(call stack_output,$(BACKEND_ECR_STACK),RepositoryUri)
 ECR_REGISTRY = $(firstword $(subst /, ,$(ECR_URI)))
 BACKEND_PARAMS_ARGS = $(shell [ -f $(BACKEND_PARAMS) ] && grep -v -e '^[[:space:]]*$(HASH)' -e '^[[:space:]]*$$' $(BACKEND_PARAMS))
 backend_output  = $(call stack_output,$(BACKEND_STACK),$(1))
+db_cluster_field = $(shell $(AWS_SHELL) rds describe-db-clusters --db-cluster-identifier $(DB_CLUSTER) \
+                     --query "DBClusters[0].$(1)" --output text 2>/dev/null)
 frontend_output = $(call stack_output,$(FRONTEND_STACK),$(1))
 cognito_output  = $(call stack_output,$(COGNITO_STACK),$(1))
 backend_domain_output = $(call stack_output,$(BACKEND_DOMAIN_STACK),$(1))
@@ -202,7 +209,7 @@ deploy-backend: aws-check aws-backend-push aws-backend-update-code aws-backend-m
 deploy-frontend: aws-check aws-frontend-publish ## Roll out the frontend: build, upload to S3, invalidate CloudFront (never CloudFormation)
 
 .PHONY: aws-backend-deploy
-aws-backend-deploy: aws-check aws-backend-ecr aws-backend-push aws-backend-stack aws-backend-migrate ## Deploy backend: ECR, image, Aurora, Lambda + function URL, migrations
+aws-backend-deploy: aws-check aws-backend-ecr aws-backend-push aws-db aws-backend-stack aws-backend-migrate ## Deploy backend: ECR, image, Aurora, Lambda + function URL, migrations
 	@echo
 	@echo "API:      $(API_URL)"
 	@echo "API docs: $(call backend_output,ApiDocsUrl)"
@@ -223,12 +230,26 @@ aws-backend-push: aws-backend-login ## Build the Lambda image for linux/$(ARCH) 
 	docker buildx build --platform linux/$(ARCH) --provenance=false -f back/Dockerfile.lambda \
 	  -t $(ECR_URI):$(TAG) --push back
 
+.PHONY: aws-db
+aws-db: ## Create the Aurora Serverless v2 cluster once (express configuration: no VPC, IAM sign-in only)
+	@if aws rds describe-db-clusters --db-cluster-identifier $(DB_CLUSTER) >/dev/null 2>&1; then \
+	  echo "Aurora cluster $(DB_CLUSTER) exists"; \
+	else \
+	  aws rds create-db-cluster --db-cluster-identifier $(DB_CLUSTER) --engine aurora-postgresql \
+	    --with-express-configuration --tags Key=PROJECT_NAME,Value=$(PROJECT) \
+	    --serverless-v2-scaling-configuration MinCapacity=$(DB_MIN_ACU),MaxCapacity=$(DB_MAX_ACU),SecondsUntilAutoPause=$(DB_AUTO_PAUSE) \
+	    --query DBCluster.Status --output text; \
+	fi
+	aws rds wait db-cluster-available --db-cluster-identifier $(DB_CLUSTER)
+	aws rds wait db-instance-available --filters Name=db-cluster-id,Values=$(DB_CLUSTER)
+
 .PHONY: aws-backend-stack
-aws-backend-stack: ## Create/update the backend stack (VPC, Aurora, Lambda) with image tag $(TAG); KEEP_IMAGE=1 keeps the image running now
+aws-backend-stack: ## Create/update the backend stack (Lambda + function URL) with image tag $(TAG); KEEP_IMAGE=1 keeps the image running now
 	$(call clear_failed_stack,$(BACKEND_STACK))
 	@test -n "$(ECR_URI)" || { echo "ECR repository not found: run \`make aws-backend-ecr\` first (and check AWS credentials in .env)"; exit 1; }
 	@test -n "$(COGNITO_POOL_ID)" || { echo "Cognito not deployed: run \`make aws-cognito-deploy\` first"; exit 1; }
-	@# The function has no internet route, so the pool's signing keys are passed in with the stack.
+	@test -n "$(call db_cluster_field,DbClusterResourceId)" || { echo "Aurora cluster not found: run \`make aws-db\` first"; exit 1; }
+	@# The pool's signing keys are passed in with the stack, so requests never wait on downloading them.
 	@# KEEP_IMAGE=1 passes the image the Lambda runs now: deploy-backend/rollback change it outside
 	@# CloudFormation, so the stack's own last-known ImageUri may be stale.
 	$(if $(KEEP_IMAGE),image=$$(aws lambda get-function --function-name $(BACKEND_FUNCTION) \
@@ -240,6 +261,8 @@ aws-backend-stack: ## Create/update the backend stack (VPC, Aurora, Lambda) with
 	  --parameter-overrides ProjectName=$(PROJECT) "ImageUri=$$image" \
 	    Architecture=$(LAMBDA_ARCH) "CorsOrigins=$(CORS_ORIGINS_AWS)" \
 	    CognitoUserPoolId=$(COGNITO_POOL_ID) CognitoClientId=$(COGNITO_CLIENT) "CognitoJwks=$$jwks" \
+	    DbHost=$(call db_cluster_field,Endpoint) DbResourceId=$(call db_cluster_field,DbClusterResourceId) \
+	    DbUsername=$(call db_cluster_field,MasterUsername) \
 	    $(BACKEND_PARAMS_ARGS)
 
 .PHONY: aws-backend-update-code
@@ -282,7 +305,7 @@ aws-backend-outputs: ## Show backend stack outputs (API URL, DB endpoint, ...)
 aws-backend-status: ## Show Lambda and Aurora status
 	@aws lambda get-function-configuration --function-name $(BACKEND_FUNCTION) \
 	  --query "{state:State, lastUpdate:LastUpdateStatus, image:CodeSha256, memory:MemorySize, timeout:Timeout}" --output yaml
-	@aws rds describe-db-clusters --db-cluster-identifier $(PROJECT)-db \
+	@aws rds describe-db-clusters --db-cluster-identifier $(DB_CLUSTER) \
 	  --query "DBClusters[0].{status:Status, capacity:ServerlessV2ScalingConfiguration}" --output yaml
 
 .PHONY: aws-backend-logs
@@ -294,10 +317,19 @@ aws-backend-health: ## Call /api/health on the function URL (the first call afte
 	curl -fsS --max-time 60 $(API_URL)api/health && echo
 
 .PHONY: aws-backend-destroy
-aws-backend-destroy: aws-check ## Delete backend stacks (a final Aurora snapshot is kept)
-	@read -p "Delete stacks $(BACKEND_STACK) and $(BACKEND_ECR_STACK) in $(AWS_REGION)? [y/N] " ok && [ "$$ok" = y ]
+aws-backend-destroy: aws-check ## Delete backend stacks and the Aurora cluster (a final Aurora snapshot is kept)
+	@read -p "Delete stacks $(BACKEND_STACK), $(BACKEND_ECR_STACK) and cluster $(DB_CLUSTER) in $(AWS_REGION)? [y/N] " ok && [ "$$ok" = y ]
 	aws cloudformation delete-stack --stack-name $(BACKEND_STACK)
 	aws cloudformation wait stack-delete-complete --stack-name $(BACKEND_STACK)
+	@for instance in $$(aws rds describe-db-clusters --db-cluster-identifier $(DB_CLUSTER) \
+	    --query "DBClusters[0].DBClusterMembers[].DBInstanceIdentifier" --output text 2>/dev/null); do \
+	  aws rds delete-db-instance --db-instance-identifier $$instance --query DBInstance.DBInstanceStatus --output text; \
+	  aws rds wait db-instance-deleted --db-instance-identifier $$instance; \
+	done
+	@if aws rds describe-db-clusters --db-cluster-identifier $(DB_CLUSTER) >/dev/null 2>&1; then \
+	  aws rds delete-db-cluster --db-cluster-identifier $(DB_CLUSTER) \
+	    --final-db-snapshot-identifier $(DB_CLUSTER)-final-$$(date +%Y%m%d%H%M%S) --query DBCluster.Status --output text; \
+	fi
 	aws cloudformation delete-stack --stack-name $(BACKEND_ECR_STACK)
 	aws cloudformation wait stack-delete-complete --stack-name $(BACKEND_ECR_STACK)
 	@echo "Done. Remove the final snapshot with: aws rds describe-db-cluster-snapshots --snapshot-type manual"

@@ -69,6 +69,7 @@ def _backend_stack_stubs(sandbox):
     _ecr(sandbox)
     sandbox.stub("aws", match=["describe-stacks", "meetings-cognito", "UserPoolId"], stdout="us-east-1_pool")
     sandbox.stub("aws", match=["describe-stacks", "meetings-cognito", "Issuer"], stdout="https://issuer")
+    sandbox.stub("aws", match=["rds", "describe-db-clusters"], stdout="cluster-ABC")
 
 
 def test_keep_image_passes_the_live_image_uri(sandbox):

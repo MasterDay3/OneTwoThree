@@ -69,7 +69,7 @@ environments and caches are in `.gitignore`).
 | `front/src/hooks/` | TanStack Query hooks: `useMeetings`, `useParticipants`, `useMe`. |
 | `front/src/lib/` | Non-UI modules: `api.ts` (typed fetch wrapper, adds the Bearer token), `auth.ts` (Cognito sign-in/up, session, Google via Hosted UI + PKCE), `calendar.ts` (date helpers, overlap layout), `participants.ts`, `utils.ts`. |
 | `front/src/test/` | Vitest + Testing Library tests and their setup. |
-| `infra/` | CloudFormation templates, one stack each: `cognito.yaml`, `backend-ecr.yaml`, `backend.yaml` (VPC, Aurora Serverless v2, Lambda + function URL), `frontend.yaml` (S3 + CloudFront + WAF), `backend-domain.yaml` (API Gateway HTTP API on `api.<domain>` in front of the Lambda), `github-oidc.yaml` (GitHub OIDC provider + the CI deploy role); `backend.params.example.env` (optional parameter overrides). |
+| `infra/` | CloudFormation templates, one stack each: `cognito.yaml`, `backend-ecr.yaml`, `backend.yaml` (Lambda + function URL; the Aurora Serverless v2 cluster itself is created by `make aws-db`), `frontend.yaml` (S3 + CloudFront + WAF), `backend-domain.yaml` (API Gateway HTTP API on `api.<domain>` in front of the Lambda), `github-oidc.yaml` (GitHub OIDC provider + the CI deploy role); `backend.params.example.env` (optional parameter overrides). |
 | `infra/scripts/` | `cert.sh`: ACM certificate and DNS helper for the custom domains (`app.` and `api.`), called by the `Makefile`. |
 | `infra/tests/` | Python checks for the repository's non-application parts (this document, the `Makefile`, the templates). |
 
@@ -317,7 +317,6 @@ backend images resolve the ranges at build time.
 | `requires-python` | `>=3.12` | `back/pyproject.toml` | A range. Ruff targets `py312`. |
 | `CI Python` | `3.12` | `.github/workflows/code-style.yml` | `uv sync --python 3.12`. |
 | `CI Node` | `24` | `.github/workflows/code-style.yml` | `actions/setup-node` `node-version`. |
-| `Aurora PostgreSQL` | `16.14` | `infra/backend.yaml` | Default of the `DbEngineVersion` parameter. |
 
 **Backend libraries** (`[project].dependencies` and the `dev` group)
 

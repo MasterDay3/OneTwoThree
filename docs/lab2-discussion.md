@@ -30,8 +30,8 @@ does instead, and why.
   - `SEED`.
   - Default credentials (`meetings/meetings` in `.env.example`).
   - `CORS_ORIGINS` pointing at localhost.
-  - In production, secrets come from a secret store (here `DbSecret` in `infra/backend.yaml`), not a
-    `.env` file.
+  - In production, secrets don't live in a `.env` file. Here the database has no password at all: the
+    Lambda signs in with short-lived IAM tokens (`DB_IAM_AUTH` in `infra/backend.yaml`).
 
 ### Waiting for a dependency
 

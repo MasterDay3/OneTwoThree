@@ -120,7 +120,8 @@ Everything is deployed to **us-east-1**. CloudFront accepts custom-domain certif
 
 - `infra/cognito.yaml`: Cognito user pool (email + password, self sign-up with email code), public app client, Hosted UI domain, and Google as an identity provider when `GOOGLE_CLIENT_ID` is set.
 - `infra/backend-ecr.yaml`: ECR repository for the backend's Lambda container image (`back/Dockerfile.lambda`).
-- `infra/backend.yaml`: VPC with private subnets, Aurora Serverless v2 PostgreSQL (scales to 0 ACU when idle), and a Lambda function with a public **function URL** (the backend URL until a custom domain is set up, then a fallback).
+- `make aws-db`: an Aurora Serverless v2 PostgreSQL cluster (scales to 0 ACU when idle) created with **express configuration**, the only kind of Aurora cluster the AWS Free plan allows. It has no VPC: it is reached through Aurora's internet access gateway, and only with IAM authentication tokens. CloudFormation can't create such clusters, so the AWS CLI does.
+- `infra/backend.yaml`: a Lambda function with a public **function URL** (the backend URL until a custom domain is set up, then a fallback) and an IAM role that may sign in to the database.
 - `infra/backend-domain.yaml`: API Gateway HTTP API on `api.<domain>` (regional ACM certificate, TLS 1.2, throttled) in front of the same Lambda.
 - `infra/github-oidc.yaml`: GitHub OIDC provider and the deploy role CI assumes (see [CI/CD](#cicd-github-actions--oidc)).
 - `infra/frontend.yaml`: private S3 bucket and CloudFront distribution for the SPA on the **flat-rate Free plan** ($0/month, with the WAF web ACL the plan requires), with an optional custom domain.
@@ -132,13 +133,13 @@ flowchart LR
     B[Browser] -->|HTTPS| CF[CloudFront + WAF<br/>Free plan, optional custom domain]
     CF --> S3[(S3<br/>built SPA)]
     B -->|HTTPS api.&lt;domain&gt;, CORS| APIGW[API Gateway HTTP API<br/>custom domain]
-    APIGW --> L[Lambda<br/>FastAPI via Mangum<br/>private subnets]
+    APIGW --> L[Lambda<br/>FastAPI via Mangum]
     URL[Lambda function URL<br/>fallback] -.-> L
-    L -->|:5432| DB[(Aurora Serverless v2<br/>PostgreSQL, private subnets)]
+    L -->|:5432 TLS, IAM token| DB[(Aurora Serverless v2<br/>PostgreSQL, express configuration)]
     L -. image .-> ECR[ECR]
 ```
 
-1. Sign in with an IAM user or role allowed to use CloudFormation, EC2/VPC, Lambda, ECR, RDS, Secrets Manager, S3, CloudFront, WAF, Pricing Plan Manager, ACM, Route 53, IAM and CloudWatch Logs. Prefer short-lived credentials: `aws sso login` (or `export AWS_PROFILE=...`). Credentials in the environment always win over `.env`; static keys in `.env` (`AWS_ACCESS_KEY_ID=...`, `AWS_SECRET_ACCESS_KEY=...`) still work for local use only and must never be committed. `make aws-check` shows who you are signed in as.
+1. Sign in with an IAM user or role allowed to use CloudFormation, Lambda, ECR, RDS, S3, CloudFront, WAF, Pricing Plan Manager, ACM, Route 53, IAM and CloudWatch Logs. Prefer short-lived credentials: `aws sso login` (or `export AWS_PROFILE=...`). Credentials in the environment always win over `.env`; static keys in `.env` (`AWS_ACCESS_KEY_ID=...`, `AWS_SECRET_ACCESS_KEY=...`) still work for local use only and must never be committed. `make aws-check` shows who you are signed in as.
 
 2. Optionally copy `infra/backend.params.example.env` to `infra/backend.params.env` to override stack parameters (memory, Aurora capacity, seeding, …).
 3. Deploy. The first run takes about 15 minutes, mostly waiting for Aurora and CloudFront:
@@ -206,6 +207,6 @@ Actions must be enabled on the fork. **Rollback:** `make aws-backend-rollback TA
 points the Lambda at an image already in ECR (the repository keeps the last 5), without rebuilding or
 migrating. Database migrations are not reverted, so roll back only across compatible schema changes.
 
-**Cost.** There is no load balancer, NAT gateway or public IPv4 address. Lambda and function URLs fit in the always-free tier for a small app. CloudFront runs on the flat-rate Free plan, which costs $0 with no overage charges and also covers its WAF web ACL (a per-IP rate limit). Requests that WAF blocks don't count toward the plan's allowance. Aurora Serverless v2 has no free tier. With `DbMinCapacity=0` it pauses after 5 idle minutes, and then you pay only for storage (about $0.10/GB-month). While active it costs about $0.12 per ACU-hour. The first request after a pause waits about 15 seconds while Aurora resumes. The DB credentials secret costs $0.40/month. API Gateway HTTP APIs cost $1.00 per million requests; custom domains and ACM certificates are free. Run `make aws-destroy` when you are done: it deletes the frontend, the API domain, the backend and Cognito (each asks first) and keeps a final Aurora snapshot. The CI role is kept unless you add `DESTROY_OIDC=1`; the account's GitHub OIDC provider itself is always retained.
+**Cost.** There is no load balancer, NAT gateway or public IPv4 address. Lambda and function URLs fit in the always-free tier for a small app. CloudFront runs on the flat-rate Free plan, which costs $0 with no overage charges and also covers its WAF web ACL (a per-IP rate limit). Requests that WAF blocks don't count toward the plan's allowance. Aurora Serverless v2 has no free tier. With `DB_MIN_ACU=0` (the default of `make aws-db`) it pauses after 5 idle minutes, and then you pay only for storage (about $0.10/GB-month). While active it costs about $0.12 per ACU-hour. The first request after a pause waits about 15 seconds while Aurora resumes. API Gateway HTTP APIs cost $1.00 per million requests; custom domains and ACM certificates are free. Run `make aws-destroy` when you are done: it deletes the frontend, the API domain, the backend and Cognito (each asks first) and keeps a final Aurora snapshot. The CI role is kept unless you add `DESTROY_OIDC=1`; the account's GitHub OIDC provider itself is always retained.
 
-On AWS the backend reads `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` and `DB_PASSWORD` instead of `DATABASE_URL`. The password is generated in Secrets Manager and resolved into the function's environment at deploy time, so the VPC needs no internet access. `DB_NULL_POOL=true` closes connections after each request, because idle connections from warm Lambdas would stop Aurora from pausing. Migrations do not run on cold start. `make aws-backend-migrate` runs them, and every `aws-backend-deploy` calls it.
+On AWS the backend reads `DB_HOST`, `DB_PORT`, `DB_NAME` and `DB_USER` instead of `DATABASE_URL`, and `DB_IAM_AUTH=true` makes every new connection sign in over TLS with a fresh IAM token (valid 15 minutes) instead of a password, so there is no database password to store anywhere. `DB_NULL_POOL=true` closes connections after each request, because idle connections from warm Lambdas would stop Aurora from pausing. Migrations do not run on cold start. `make aws-backend-migrate` runs them, and every `aws-backend-deploy` calls it.
