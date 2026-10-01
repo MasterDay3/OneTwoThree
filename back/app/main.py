@@ -2,7 +2,7 @@ import logging
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.config import settings
 from app.routers import health, me, meetings, participants
@@ -37,6 +37,12 @@ def handle_not_found(_: Request, exc: NotFoundError) -> JSONResponse:
 @app.exception_handler(ConflictError)
 def handle_conflict(_: Request, exc: ConflictError) -> JSONResponse:
     return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+# The API's bare domain has nothing of its own; send visitors to the docs.
+@app.get("/", include_in_schema=False)
+def root() -> RedirectResponse:
+    return RedirectResponse("/api/docs")
 
 
 app.include_router(health.router, prefix="/api")
