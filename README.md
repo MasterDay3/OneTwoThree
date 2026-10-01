@@ -193,7 +193,7 @@ runner. Deploys run one at a time, in push order.
 
 GitHub gets AWS access through **OIDC**, not stored keys. Each run receives a signed token naming the
 repository and branch; AWS exchanges it for temporary credentials of the role in
-`infra/github-oidc.yaml`, whose trust policy accepts only `repo:MasterDay3/OneTwoThree:ref:refs/heads/main`
+`infra/github-oidc.yaml`, whose trust policy accepts only `repo:MasterDay3@71492385/OneTwoThree@1394638106:ref:refs/heads/main`
 and whose permissions cover only this project's ECR repository, Lambda function, S3 bucket,
 CloudFront distribution and stack outputs. One-time setup, after the frontend stack exists:
 

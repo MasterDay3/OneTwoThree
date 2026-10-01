@@ -218,7 +218,7 @@ does instead, and why.
   - each workflow run gets a GitHub-signed token naming the repository and ref;
   - AWS exchanges it for credentials that expire with the job.
   - Our trust policy uses **`StringEquals`** on `token.actions.githubusercontent.com:sub` =
-    `repo:MasterDay3/OneTwoThree:ref:refs/heads/main` and on `aud` = `sts.amazonaws.com`. Only
+    `repo:MasterDay3@71492385/OneTwoThree@1394638106:ref:refs/heads/main` and on `aud` = `sts.amazonaws.com`. Only
     workflows running on `main` of this fork can assume it; other branches, PRs, forks, other repos
     and jobs with an `environment:` cannot.
   - The role can only push to one ECR repository, update and invoke one Lambda, write to one bucket,

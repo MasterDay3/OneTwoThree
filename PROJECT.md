@@ -364,7 +364,7 @@ changed deliberately from a laptop. **Code** is rolled out by `make deploy-backe
 image, push it to ECR tagged with the commit SHA, point the Lambda at it, run migrations) and
 `make deploy-frontend` (build the SPA, upload to S3, invalidate CloudFront). CI runs exactly those two
 targets on every push to `main`, with credentials from GitHub OIDC (`infra/github-oidc.yaml`; trust
-limited to `repo:MasterDay3/OneTwoThree:ref:refs/heads/main`). The backend runs on Lambda + Aurora
+limited to `repo:MasterDay3@71492385/OneTwoThree@1394638106:ref:refs/heads/main`). The backend runs on Lambda + Aurora
 Serverless v2 (not ECS/ALB) and is served on `https://api.<domain>` through an API Gateway HTTP API,
 with the function URL kept as a fallback; the frontend is served on `https://app.<domain>` by
 CloudFront from a private S3 bucket. Setup steps, costs and teardown are in `README.md`.

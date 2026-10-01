@@ -14,7 +14,7 @@ TEMPLATE = "github-oidc.yaml"
 OIDC_HOST = "token.actions.githubusercontent.com"
 SUB_KEY = f"{OIDC_HOST}:sub"
 AUD_KEY = f"{OIDC_HOST}:aud"
-TRUSTED_SUB = "repo:MasterDay3/OneTwoThree:ref:refs/heads/main"
+TRUSTED_SUB = "repo:MasterDay3@71492385/OneTwoThree@1394638106:ref:refs/heads/main"
 AUDIENCE = "sts.amazonaws.com"
 
 # FR-18: the complete, exact per-service action sets of the deploy role.
@@ -186,7 +186,7 @@ def test_sub_is_an_exact_literal_for_this_fork(trust_statement):
     sub = trust_statement["Condition"]["StringEquals"][SUB_KEY]
     assert isinstance(sub, str), "the sub claim must be a literal string, not a parameter/intrinsic"
     assert sub == TRUSTED_SUB
-    assert "MasterDay3/OneTwoThree" in sub
+    assert sub.startswith("repo:MasterDay3@") and "/OneTwoThree@" in sub
     assert "*" not in sub and "?" not in sub
 
 
