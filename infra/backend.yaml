@@ -1,7 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Meetings App - backend on AWS Lambda (container image) behind a public function URL,
-  PostgreSQL on Aurora Serverless v2 that scales to zero. No NAT gateway, no load balancer.
+  Meetings App - backend on AWS Lambda (container image) behind a public function URL. The database is
+  an Aurora Serverless v2 cluster created with express configuration by `make aws-db` (CloudFormation
+  can't create those): no VPC, reached through its internet access gateway with IAM tokens only.
 
 Parameters:
   ProjectName:
@@ -54,172 +55,26 @@ Parameters:
   CognitoJwks:
     Type: String
     Description: >-
-      The pool's public signing keys (JWKS JSON). Passed in because the function has no internet
-      route to download them; Cognito does not rotate user pool keys.
+      The pool's public signing keys (JWKS JSON). Passed in so requests never wait on downloading
+      them; Cognito does not rotate user pool keys.
 
-  # --- Database (Aurora Serverless v2, PostgreSQL) ---
-  DbEngineVersion:
+  # --- Database (from `make aws-db`; the Makefile passes them) ---
+  DbHost:
     Type: String
-    Default: "16.14"
-    Description: Aurora PostgreSQL version; scaling to 0 ACU needs 13.15+, 14.12+, 15.7+ or 16.3+.
-  DbMinCapacity:
-    Type: Number
-    Default: 0
-    MinValue: 0
-    MaxValue: 256
-    Description: Minimum ACUs. 0 lets the database pause when idle, so you pay only for storage.
-  DbMaxCapacity:
-    Type: Number
-    Default: 1
-    MinValue: 1
-    MaxValue: 256
-    Description: Maximum ACUs (1 ACU is about 2 GiB of memory).
-  DbSecondsUntilAutoPause:
-    Type: Number
-    Default: 300
-    MinValue: 300
-    MaxValue: 86400
-    Description: Idle seconds without connections before the database pauses (only when DbMinCapacity is 0).
-  DbName:
+    Description: Writer endpoint of the Aurora cluster.
+  DbResourceId:
     Type: String
-    Default: meetings
+    Description: The cluster's resource ID (cluster-...), which IAM database authentication is scoped to.
   DbUsername:
     Type: String
-    Default: meetings
-  DbBackupRetentionDays:
-    Type: Number
-    Default: 1
-    MinValue: 1
-    MaxValue: 35
+    Default: postgres
+    Description: Master user; express configuration signs it in with IAM tokens only.
+  DbName:
+    Type: String
+    Default: postgres
+    Description: Database the app uses (express configuration creates only the default one).
 
 Resources:
-  # =====================================================================
-  # Network: two private subnets (Aurora needs two AZs). Nothing here is reachable from the
-  # internet; the function URL is served by the Lambda service, not from inside the VPC.
-  # =====================================================================
-  Vpc:
-    Type: AWS::EC2::VPC
-    Properties:
-      CidrBlock: 10.20.0.0/16
-      EnableDnsSupport: true
-      EnableDnsHostnames: true
-      Tags:
-        - { Key: Name, Value: !Sub "${ProjectName}-vpc" }
-        - Key: PROJECT_NAME
-          Value: !Ref ProjectName
-
-  PrivateSubnet1:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref Vpc
-      AvailabilityZone: !Select [0, !GetAZs ""]
-      CidrBlock: !Select [0, !Cidr [!GetAtt Vpc.CidrBlock, 2, 8]]
-      Tags:
-        - { Key: Name, Value: !Sub "${ProjectName}-private-1" }
-        - Key: PROJECT_NAME
-          Value: !Ref ProjectName
-
-  PrivateSubnet2:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref Vpc
-      AvailabilityZone: !Select [1, !GetAZs ""]
-      CidrBlock: !Select [1, !Cidr [!GetAtt Vpc.CidrBlock, 2, 8]]
-      Tags:
-        - { Key: Name, Value: !Sub "${ProjectName}-private-2" }
-        - Key: PROJECT_NAME
-          Value: !Ref ProjectName
-
-  # --- Security groups ---
-  BackendSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Backend Lambda - outbound to the database only
-      VpcId: !Ref Vpc
-      Tags:
-        - { Key: Name, Value: !Sub "${ProjectName}-backend" }
-        - Key: PROJECT_NAME
-          Value: !Ref ProjectName
-
-  DbSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: PostgreSQL - only from the backend Lambda
-      VpcId: !Ref Vpc
-      SecurityGroupIngress:
-        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref BackendSecurityGroup }
-      Tags:
-        - { Key: Name, Value: !Sub "${ProjectName}-db" }
-        - Key: PROJECT_NAME
-          Value: !Ref ProjectName
-
-  # =====================================================================
-  # Database
-  # =====================================================================
-  # Generated once; resolved at deploy time into the cluster and the function's environment,
-  # so the Lambda needs no route to Secrets Manager (and the VPC no NAT gateway or endpoint).
-  DbSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Tags:
-        - Key: PROJECT_NAME
-          Value: !Ref ProjectName
-      Description: !Sub Master credentials of the ${ProjectName} Aurora cluster
-      GenerateSecretString:
-        SecretStringTemplate: !Sub '{"username": "${DbUsername}"}'
-        GenerateStringKey: password
-        PasswordLength: 32
-        ExcludePunctuation: true
-
-  DbSubnetGroup:
-    Type: AWS::RDS::DBSubnetGroup
-    Properties:
-      Tags:
-        - Key: PROJECT_NAME
-          Value: !Ref ProjectName
-      DBSubnetGroupDescription: !Sub ${ProjectName} database subnets
-      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
-
-  DbCluster:
-    Type: AWS::RDS::DBCluster
-    # A final snapshot is kept when the stack is deleted.
-    DeletionPolicy: Snapshot
-    UpdateReplacePolicy: Snapshot
-    Properties:
-      Tags:
-        - Key: PROJECT_NAME
-          Value: !Ref ProjectName
-      DBClusterIdentifier: !Sub ${ProjectName}-db
-      Engine: aurora-postgresql
-      EngineVersion: !Ref DbEngineVersion
-      DatabaseName: !Ref DbName
-      MasterUsername: !Ref DbUsername
-      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:password}}"
-      DBSubnetGroupName: !Ref DbSubnetGroup
-      VpcSecurityGroupIds: [!Ref DbSecurityGroup]
-      StorageEncrypted: true
-      CopyTagsToSnapshot: true
-      BackupRetentionPeriod: !Ref DbBackupRetentionDays
-      DeletionProtection: false
-      ServerlessV2ScalingConfiguration:
-        MinCapacity: !Ref DbMinCapacity
-        MaxCapacity: !Ref DbMaxCapacity
-        SecondsUntilAutoPause: !Ref DbSecondsUntilAutoPause
-
-  DbInstance:
-    Type: AWS::RDS::DBInstance
-    Properties:
-      Tags:
-        - Key: PROJECT_NAME
-          Value: !Ref ProjectName
-      DBInstanceIdentifier: !Sub ${ProjectName}-db-1
-      DBClusterIdentifier: !Ref DbCluster
-      Engine: aurora-postgresql
-      DBInstanceClass: db.serverless
-      PubliclyAccessible: false
-      AutoMinorVersionUpgrade: true
-      EnablePerformanceInsights: false
-
   # =====================================================================
   # Lambda
   # =====================================================================
@@ -232,8 +87,8 @@ Resources:
       LogGroupName: !Sub /aws/lambda/${ProjectName}-backend
       RetentionInDays: !Ref LogRetentionDays
 
-  # Logs and the network interfaces Lambda needs to join the VPC; the app needs nothing else
-  # (tokens are verified with the JWKS from the environment, without calling Cognito).
+  # Logs, plus signing in to the database as DbUsername with IAM tokens. Cognito tokens are verified
+  # with the JWKS from the environment, without calling Cognito.
   BackendRole:
     Type: AWS::IAM::Role
     Properties:
@@ -247,12 +102,18 @@ Resources:
             Principal: { Service: lambda.amazonaws.com }
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: database-connect
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: rds-db:connect
+                Resource: !Sub arn:${AWS::Partition}:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:${DbResourceId}/${DbUsername}
 
   BackendFunction:
     Type: AWS::Lambda::Function
-    # The function is usable only once the database instance exists.
-    DependsOn: DbInstance
     Properties:
       Tags:
         - Key: PROJECT_NAME
@@ -267,16 +128,13 @@ Resources:
       Role: !GetAtt BackendRole.Arn
       LoggingConfig:
         LogGroup: !Ref BackendLogGroup
-      VpcConfig:
-        SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
-        SecurityGroupIds: [!Ref BackendSecurityGroup]
       Environment:
         Variables:
-          DB_HOST: !GetAtt DbCluster.Endpoint.Address
-          DB_PORT: !GetAtt DbCluster.Endpoint.Port
+          DB_HOST: !Ref DbHost
+          DB_PORT: "5432"
           DB_NAME: !Ref DbName
           DB_USER: !Ref DbUsername
-          DB_PASSWORD: !Sub "{{resolve:secretsmanager:${DbSecret}:SecretString:password}}"
+          DB_IAM_AUTH: "true"
           # Close connections after each request: Aurora pauses only when none are open.
           DB_NULL_POOL: "true"
           CORS_ORIGINS: !Ref CorsOrigins
@@ -322,8 +180,5 @@ Outputs:
   LogGroupName:
     Value: !Ref BackendLogGroup
   DbEndpoint:
-    Description: Aurora writer endpoint (reachable only from inside the VPC).
-    Value: !GetAtt DbCluster.Endpoint.Address
-  DbSecretArn:
-    Description: Secrets Manager secret with the database master credentials.
-    Value: !Ref DbSecret
+    Description: Aurora writer endpoint (internet access gateway, IAM authentication).
+    Value: !Ref DbHost

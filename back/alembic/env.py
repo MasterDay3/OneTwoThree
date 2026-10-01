@@ -1,11 +1,11 @@
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import create_engine, pool, text
+from sqlalchemy import pool, text
 
 from app import models  # noqa: F401  (registers tables on Base.metadata)
 from app.config import settings
-from app.db import Base
+from app.db import Base, create_db_engine
 
 config = context.config
 
@@ -26,7 +26,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = create_engine(settings.sqlalchemy_url, poolclass=pool.NullPool)
+    connectable = create_db_engine(poolclass=pool.NullPool)
     with connectable.connect() as connection:
         # Session-level lock: survives the commits below, released explicitly in `finally`.
         connection.execute(text("SELECT pg_advisory_lock(:id)"), {"id": MIGRATION_LOCK_ID})

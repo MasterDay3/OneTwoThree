@@ -1,13 +1,15 @@
 name: Code style
 
+# Runs on pull requests, and on every push to main as the first stage of deploy.yml (workflow_call),
+# so a lint failure on main blocks the deploy.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
 
+# A newer PR push cancels the older PR run; a run called from deploy.yml is never cancelled.
 concurrency:
-  group: code-style-${{ github.ref }}
-  cancel-in-progress: true
+  group: code-style-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -20,9 +22,11 @@ jobs:
       run:
         working-directory: back
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           enable-cache: true
           cache-dependency-glob: back/pyproject.toml
@@ -43,9 +47,11 @@ jobs:
       run:
         working-directory: front
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
@@ -67,9 +73,30 @@ jobs:
     name: Infra (cfn-lint)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
 
       - name: Lint CloudFormation templates
         run: uvx cfn-lint --format parseable infra/*.yaml
+
+  infra-tests:
+    name: Infra tests (templates, Makefile deploy contract, workflows)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+
+      # GNU make 4.x here; the same suite also runs locally on macOS make 3.81.
+      - name: Test
+        run: uvx --with pyyaml pytest infra/tests -q
+
+      - name: Lint tests
+        run: |
+          uvx ruff check --config back/pyproject.toml infra/tests
+          uvx ruff format --check --config back/pyproject.toml infra/tests

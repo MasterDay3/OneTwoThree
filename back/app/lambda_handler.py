@@ -1,7 +1,10 @@
-"""AWS Lambda entry point: HTTP requests from the function URL, plus a `migrate` action.
+"""AWS Lambda entry point: HTTP requests, plus a `migrate` action.
 
-`make aws-backend-migrate` invokes the function directly with {"action": "migrate"} to apply
-Alembic migrations and seed data; function URL events never carry a top-level "action".
+HTTP arrives two ways, both as payload format 2.0 events that Mangum handles the same way: through the
+API Gateway HTTP API on the custom domain (`api.<domain>`, infra/backend-domain.yaml) and through the
+Lambda function URL, which stays as the fallback. `make aws-backend-migrate` invokes the function
+directly with {"action": "migrate"} to apply Alembic migrations and seed data; HTTP events never carry
+a top-level "action".
 """
 
 from pathlib import Path

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ACM certificate for the frontend's custom domain (used by the Makefile `aws-frontend-*` targets).
+# ACM certificate for a custom domain (used by the Makefile `aws-frontend-*` and `aws-backend-*` domain targets).
 #
 #   cert.sh request <domain>  request (or reuse) a DNS-validated certificate and set up validation
 #   cert.sh status  <domain>  show certificate status and the validation record
@@ -86,7 +86,7 @@ Add this record at the DNS provider of ${domain#*.}:
   ${bold}Value: ${value%.}${reset}
 
 (Some providers want only the part of the name before .${domain#*.}.)
-Then run: make aws-frontend-https
+Then run the matching: make aws-frontend-https / make aws-backend-https
 EOF
 }
 
@@ -127,7 +127,7 @@ case $cmd in
   status)
     arn=$(cert_arn ISSUED PENDING_VALIDATION)
     if [[ -z $arn ]]; then
-      echo "No certificate for $domain in $AWS_REGION. Run: make aws-frontend-cert"
+      echo "No certificate for $domain in $AWS_REGION. Run the matching: make aws-frontend-cert / make aws-backend-cert"
       exit 1
     fi
     status=$(cert_status "$arn")
@@ -143,7 +143,7 @@ case $cmd in
   wait)
     arn=$(cert_arn ISSUED PENDING_VALIDATION)
     if [[ -z $arn ]]; then
-      echo "No certificate for $domain. Run: make aws-frontend-cert" >&2
+      echo "No certificate for $domain. Run the matching: make aws-frontend-cert / make aws-backend-cert" >&2
       exit 1
     fi
     if [[ $(cert_status "$arn") != ISSUED ]]; then

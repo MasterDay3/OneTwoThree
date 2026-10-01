@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Meetings App - HTTPS front door for the backend on a custom domain (e.g. api.example.com): an API Gateway
+  HTTP API with a single $default route proxying every request to the existing backend Lambda, a regional
+  custom domain (TLS 1.2) and an optional Route 53 alias. Deploy in the backend's region, with an ACM
+  certificate issued in that same region.
+
+# Why an HTTP API: Lambda function URLs cannot be given a custom domain, and an HTTP API is the cheapest
+# managed way to put one in front of the function (pay per request, no idle cost, no load balancer).
+# The function URL from backend.yaml stays in place as a fallback entry point; note that it is NOT covered
+# by the throttling below. CORS (including preflight) is handled by FastAPI's CORSMiddleware, so the API
+# deliberately has no CorsConfiguration of its own.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: meetings
+    Description: Name prefix for all resources.
+  BackendFunctionName:
+    Type: String
+    Description: Name of the backend Lambda function (the FunctionName output of the backend stack).
+  DomainName:
+    Type: String
+    Description: Custom domain for the API (e.g. api.example.com).
+  CertificateArn:
+    Type: String
+    Description: ACM certificate for DomainName, issued in this stack's region (regional endpoint).
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: Optional Route 53 public hosted zone of DomainName; when set, an alias record to the API is created.
+  ThrottleBurstLimit:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    Description: Maximum concurrent request burst the API accepts before answering 429.
+  ThrottleRateLimit:
+    Type: Number
+    Default: 50
+    MinValue: 1
+    Description: Steady-state requests per second the API accepts before answering 429.
+
+Conditions:
+  CreateDnsRecord: !Not [!Equals [!Ref HostedZoneId, ""]]
+
+Resources:
+  # The default execute-api endpoint is disabled so the custom domain is the only way in through the gateway.
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ${ProjectName}-backend-api
+      Description: !Sub ${ProjectName} backend (proxies every request to the Lambda function)
+      ProtocolType: HTTP
+      DisableExecuteApiEndpoint: true
+      Tags:
+        PROJECT_NAME: !Ref ProjectName
+
+  # Payload format 2.0 is the same event shape a function URL sends, which Mangum already handles.
+  # 30 s is API Gateway's hard ceiling for an integration and matches the function's own default Timeout
+  # (backend.yaml), which leaves room for Aurora to resume from 0 ACU. It is a literal on purpose, so the
+  # gateway can never silently become the shorter budget.
+  LambdaIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${BackendFunctionName}
+      PayloadFormatVersion: "2.0"
+      TimeoutInMillis: 30000
+
+  # Catch-all route: FastAPI does the routing (paths stay /api/..., no prefix added).
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: $default
+      Target: !Sub integrations/${LambdaIntegration}
+
+  # HTTP API stages throttle through DefaultRouteSettings (there is no ThrottleSettings as on REST APIs).
+  DefaultStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: !Ref ThrottleBurstLimit
+        ThrottlingRateLimit: !Ref ThrottleRateLimit
+      Tags:
+        PROJECT_NAME: !Ref ProjectName
+
+  # Only this API (any stage, method and path) may invoke the function, never every API in the account.
+  InvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BackendFunctionName
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*
+
+  ApiDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: !Ref DomainName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref CertificateArn
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+      Tags:
+        PROJECT_NAME: !Ref ProjectName
+
+  # Root mapping: https://<DomainName>/api/... reaches the $default stage without a path prefix.
+  # Referencing the stage already makes CloudFormation create it first (an explicit DependsOn is redundant).
+  ApiMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      ApiId: !Ref HttpApi
+      DomainName: !Ref ApiDomain
+      Stage: !Ref DefaultStage
+      ApiMappingKey: ""
+
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: CreateDnsRecord
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ApiDomain.RegionalDomainName
+        HostedZoneId: !GetAtt ApiDomain.RegionalHostedZoneId
+        EvaluateTargetHealth: false
+
+Outputs:
+  ApiUrl:
+    Description: Backend base URL on the custom domain (trailing slash); API routes live under /api.
+    Value: !Sub "https://${DomainName}/"
+  ApiDocsUrl:
+    Description: Swagger UI of the deployed backend on the custom domain.
+    Value: !Sub "https://${DomainName}/api/docs"
+  ApiId:
+    Value: !Ref HttpApi
+  RegionalDomainName:
+    Description: Point a CNAME for DomainName here when DNS is not in Route 53.
+    Value: !GetAtt ApiDomain.RegionalDomainName
