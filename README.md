@@ -13,8 +13,8 @@ make start       # the same without watching (returns once the stack is healthy)
 make help        # all targets: logs, test, lint, format, clean, aws-*
 ```
 
-- App: http://localhost:3000 (sign in / sign up; the calendar is at `/home`). Until Cognito is set
-  up (see [Sign-in](#sign-in-cognito)), nothing is checked: any valid form opens the calendar and
+- App: http://localhost:3000 (the calendar is at `/home`, sign-in at `/login/`). Until Cognito is set
+  up (see [Sign-in](#sign-in-cognito)), nothing is checked: the calendar opens directly and
   everyone is one local user.
 - API docs: http://localhost:3000/api/docs (or http://localhost:8000/api/docs directly)
 
@@ -49,8 +49,9 @@ and at least one of `call_link` or `place`.
 
 ## Sign-in (Cognito)
 
-The browser signs in with a Cognito user pool directly: email + password (sign-up sends a 6-digit
-code to confirm the email) and, once configured, Google through the Cognito Hosted UI. The API
+`/login/` redirects to Cognito's managed login (`react-oidc-context`, code flow with PKCE): email +
+password (sign-up sends a 6-digit code to confirm the email) and, once configured, Continue with
+Google. The browser comes back to `/auth/callback`, and the header shows the signed-in email. The API
 verifies the ID token's signature, issuer, audience and expiry against the pool's public keys and
 stores the user in the `users` table (keyed by the token's `sub`), where extra profile data lives.
 
@@ -66,8 +67,7 @@ every request acts as one local user (`dev@localhost`).
 **Google sign-in** (off until configured): create an OAuth client ID (type "Web application") in
 Google Cloud with the redirect URI `https://<COGNITO_DOMAIN>/oauth2/idpresponse`, set
 `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`, then run `make aws-cognito-deploy` again and
-copy `COGNITO_GOOGLE_ENABLED=true` into `.env`. On AWS, run `make aws-frontend-publish` to rebuild the
-frontend with it. Until then the Google button shows as "coming soon".
+copy `COGNITO_GOOGLE_ENABLED=true` into `.env`. Managed login then shows Continue with Google.
 
 On AWS the Lambda has no internet access, so `aws-backend-stack` downloads the pool's JWKS and passes
 it in as `COGNITO_JWKS`. Cognito does not rotate user pool signing keys. Meetings created before

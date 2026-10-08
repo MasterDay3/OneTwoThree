@@ -23,13 +23,6 @@ export const sampleUser: User = {
   name: "Anna Kovalenko",
 }
 
-/** A stored session, as after signing in (with auth disabled, as in tests by default). */
-export function signInForTest(
-  session: object = { idToken: "", expiresAt: Number.MAX_SAFE_INTEGER },
-) {
-  localStorage.setItem("meetings.session", JSON.stringify(session))
-}
-
 /** Replaces global fetch; returns the mock so tests can inspect calls. `/api/me` always
  * answers with `sampleUser`. */
 export function mockFetch(handler: Handler) {

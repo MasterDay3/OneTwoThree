@@ -1,24 +1,15 @@
-import { useQueryClient } from "@tanstack/react-query"
-import { CalendarDays, LogOut, Plus } from "lucide-react"
-import { Link, useNavigate } from "react-router"
+import { CalendarDays, LogIn, LogOut, Plus } from "lucide-react"
+import { Link } from "react-router"
 
-import { useMe } from "@/hooks/useMe"
-import { signOut } from "@/lib/auth"
+import { useSession } from "@/hooks/useSession"
+import { authEnabled, signOut } from "@/lib/auth"
 
 interface SiteHeaderProps {
-  onNewMeeting: () => void
+  onNewMeeting?: () => void
 }
 
 export function SiteHeader({ onNewMeeting }: SiteHeaderProps) {
-  const { data: me } = useMe()
-  const queryClient = useQueryClient()
-  const navigate = useNavigate()
-
-  const handleSignOut = () => {
-    signOut()
-    queryClient.clear()
-    navigate("/", { replace: true })
-  }
+  const { isLoading, isAuthenticated, email } = useSession()
 
   return (
     <header className="sticky top-0 z-40 bg-brand text-white shadow-[0_0.8px_8px_rgba(0,0,0,0.2)]">
@@ -44,31 +35,45 @@ export function SiteHeader({ onNewMeeting }: SiteHeaderProps) {
         </nav>
 
         <div className="ml-auto flex items-center gap-4">
-          <button
-            type="button"
-            onClick={onNewMeeting}
-            className="flex items-center gap-1.5 text-sm font-semibold hover:text-white/80"
-          >
-            <Plus className="size-4" /> New meeting
-          </button>
-          <span className="h-8 w-px bg-white/30" />
-          {me && (
-            <span
-              className="hidden max-w-48 truncate text-sm text-white/90 lg:inline"
-              title={me.email}
-            >
-              {me.name ?? me.email}
-            </span>
+          {isAuthenticated ? (
+            <>
+              {onNewMeeting && (
+                <button
+                  type="button"
+                  onClick={onNewMeeting}
+                  className="flex items-center gap-1.5 text-sm font-semibold hover:text-white/80"
+                >
+                  <Plus className="size-4" /> New meeting
+                </button>
+              )}
+              {authEnabled() && (
+                <>
+                  <span className="h-8 w-px bg-white/30" />
+                  <span className="max-w-48 truncate text-sm text-white/90" title={email}>
+                    {email}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void signOut()}
+                    className="flex items-center gap-1.5 text-sm text-white/90 hover:text-white"
+                    aria-label="Sign out"
+                  >
+                    <LogOut className="size-4" />
+                    <span className="hidden md:inline">Sign out</span>
+                  </button>
+                </>
+              )}
+            </>
+          ) : (
+            !isLoading && (
+              <Link
+                to="/login"
+                className="flex items-center gap-1.5 text-sm font-semibold hover:text-white/80"
+              >
+                <LogIn className="size-4" /> Sign in
+              </Link>
+            )
           )}
-          <button
-            type="button"
-            onClick={handleSignOut}
-            className="flex items-center gap-1.5 text-sm text-white/90 hover:text-white"
-            aria-label="Sign out"
-          >
-            <LogOut className="size-4" />
-            <span className="hidden md:inline">Sign out</span>
-          </button>
         </div>
       </div>
     </header>

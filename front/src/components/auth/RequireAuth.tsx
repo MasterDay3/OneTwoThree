@@ -1,14 +1,20 @@
 import type { ReactNode } from "react"
-import { Navigate } from "react-router"
 
-import { isSignedIn } from "@/lib/auth"
+import { SiteHeader } from "@/components/SiteHeader"
+import { useSession } from "@/hooks/useSession"
 
-/** Renders the page only with a session; otherwise sends the user to sign in. */
+/** Renders the page only with a session; otherwise the header with its Sign in button. */
 export function RequireAuth({ children }: { children: ReactNode }) {
-  return isSignedIn() ? children : <Navigate to="/" replace />
-}
-
-/** Sign-in and sign-up pages skip straight to the calendar when already signed in. */
-export function RedirectIfSignedIn({ children }: { children: ReactNode }) {
-  return isSignedIn() ? <Navigate to="/home" replace /> : children
+  const { isLoading, isAuthenticated } = useSession()
+  if (isAuthenticated) return children
+  return (
+    <div className="flex min-h-screen flex-col">
+      <SiteHeader />
+      {!isLoading && (
+        <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-10 sm:px-6">
+          <p className="text-muted-foreground">Sign in to see your meetings.</p>
+        </main>
+      )}
+    </div>
+  )
 }

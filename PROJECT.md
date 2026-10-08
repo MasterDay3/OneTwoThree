@@ -62,12 +62,12 @@ environments and caches are in `.gitignore`).
 | `docs/` | `lab2-discussion.md`: answers to the lab's discussion questions, grounded in this repository's files. |
 | `front/` | Frontend: Vite + React + TypeScript + Tailwind + shadcn/ui; `package.json` + `package-lock.json`, lint/format/TS config, `Dockerfile` (build with Node, serve with nginx) and `nginx.conf`. |
 | `front/src/` | App entry (`main.tsx`, `App.tsx` with the routes), `types.ts` (TypeScript mirror of the API schemas), global CSS. |
-| `front/src/pages/` | One component per route: `LoginPage` (`/`), `SignUpPage` (`/signup`), `ConfirmPage` (`/confirm`), `AuthCallbackPage` (`/auth/callback`), `HomePage` (`/home`, the calendar; needs sign-in). |
+| `front/src/pages/` | One component per route: `LoginPage` (`/login`, redirects to Cognito's managed login), `AuthCallbackPage` (`/auth/callback`), `HomePage` (`/home`, the calendar; needs sign-in). |
 | `front/src/components/` | App components: `MeetingsCalendar`, `MeetingFormDialog`, `DeleteMeetingDialog`, `ParticipantsMultiSelect`, header/footer, `BackToTop`. |
-| `front/src/components/auth/` | Sign-in building blocks: `AuthLayout`, `GoogleButton`, `PasswordInput`, `RequireAuth` (route guard). |
+| `front/src/components/auth/` | Sign-in building blocks: `AuthLayout`, `RequireAuth` (route guard; shows the header's Sign in button when signed out). |
 | `front/src/components/ui/` | Generated shadcn/ui primitives (buttons, dialogs, inputs…); regenerated with the shadcn CLI rather than hand-edited. |
-| `front/src/hooks/` | TanStack Query hooks: `useMeetings`, `useParticipants`, `useMe`. |
-| `front/src/lib/` | Non-UI modules: `api.ts` (typed fetch wrapper, adds the Bearer token), `auth.ts` (Cognito sign-in/up, session, Google via Hosted UI + PKCE), `calendar.ts` (date helpers, overlap layout), `participants.ts`, `utils.ts`. |
+| `front/src/hooks/` | TanStack Query hooks `useMeetings`, `useParticipants`; `useSession` (who is signed in). |
+| `front/src/lib/` | Non-UI modules: `api.ts` (typed fetch wrapper, adds the Bearer token), `auth.ts` (OIDC client for Cognito managed login, ID token for the API, Cognito logout), `calendar.ts` (date helpers, overlap layout), `participants.ts`, `utils.ts`. |
 | `front/src/test/` | Vitest + Testing Library tests and their setup. |
 | `infra/` | CloudFormation templates, one stack each: `cognito.yaml`, `backend-ecr.yaml`, `backend.yaml` (Lambda + function URL; the Aurora Serverless v2 cluster itself is created by `make aws-db`), `frontend.yaml` (S3 + CloudFront + WAF), `backend-domain.yaml` (API Gateway HTTP API on `api.<domain>` in front of the Lambda), `github-oidc.yaml` (GitHub OIDC provider + the CI deploy role); `backend.params.example.env` (optional parameter overrides). |
 | `infra/scripts/` | `cert.sh`: ACM certificate and DNS helper for the custom domains (`app.` and `api.`), called by the `Makefile`. |

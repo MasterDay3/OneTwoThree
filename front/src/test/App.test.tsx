@@ -1,31 +1,13 @@
 import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { beforeEach, describe, expect, it } from "vitest"
+import { describe, expect, it } from "vitest"
 
 import App from "@/App"
 import { formatLongDay, layoutDay } from "@/lib/calendar"
 import { parseNewParticipant } from "@/lib/participants"
-import { mockFetch, renderWithQuery, sampleMeeting, signInForTest, todayAt } from "@/test/utils"
+import { mockFetch, renderWithQuery, sampleMeeting, todayAt } from "@/test/utils"
 
 describe("Home page", () => {
-  beforeEach(() => signInForTest())
-
-  it("sends signed-out users to sign in", async () => {
-    localStorage.clear()
-    mockFetch(() => ({ body: [] }))
-    renderWithQuery(<App />, "/home")
-    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument()
-  })
-
-  it("shows the signed-in user and signs out", async () => {
-    mockFetch(() => ({ body: [] }))
-    renderWithQuery(<App />, "/home")
-    expect(await screen.findByText("Anna Kovalenko")).toBeInTheDocument()
-    await userEvent.click(screen.getByRole("button", { name: "Sign out" }))
-    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument()
-    expect(localStorage.getItem("meetings.session")).toBeNull()
-  })
-
   it("shows meetings in the week calendar with details on click", async () => {
     mockFetch(() => ({ body: [sampleMeeting] }))
     renderWithQuery(<App />, "/home")

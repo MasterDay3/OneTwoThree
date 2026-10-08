@@ -1,4 +1,4 @@
-import { getIdToken, signOut } from "@/lib/auth"
+import { authEnabled, getIdToken, userManager } from "@/lib/auth"
 import type {
   Meeting,
   MeetingCreate,
@@ -45,9 +45,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     },
   })
 
-  // Session gone or rejected: back to the sign-in page.
-  if (response.status === 401) {
-    signOut()
+  // Session gone or rejected: drop it and go back to the signed-out page.
+  if (response.status === 401 && authEnabled()) {
+    await userManager().removeUser()
     window.location.assign("/")
   }
 
