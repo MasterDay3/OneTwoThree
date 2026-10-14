@@ -55,6 +55,7 @@ environments and caches are in `.gitignore`).
 | `back/` | Backend: FastAPI app, Alembic migrations, tests, `pyproject.toml` + `uv.lock`, `Dockerfile` (Compose) and `Dockerfile.lambda` (AWS Lambda image). |
 | `back/app/` | The Python package `app`: `main.py` (FastAPI app, CORS, 404/409 error handlers), `config.py` (settings from env), `db.py` (engine, session), `models.py` (SQLAlchemy tables), `schemas.py` (Pydantic request/response models = the API contract), `auth.py` (Cognito ID-token check), `seed.py` (sample participants), `lambda_handler.py` (Mangum entry point + `migrate` action), `reports/` (`weekly.py`: the weekly report as CSV; `lambda_handler.py`: the `report-builder` Lambda entry point). |
 | `back/app/routers/` | HTTP layer only: one module per resource (`health`, `me`, `meetings`, `participants`), mounted under `/api` in `main.py`. |
+| `back/app/reports/` | The weekly meetings report (`infra/reports.yaml`): `weekly.py` builds one ISO week as CSV with no AWS in it; `lambda_handler.py` is the `report-builder` Lambda (SQS or direct invocation → S3). |
 | `back/app/services/` | Business logic and queries used by the routers (`meetings`, `participants`, `users`) and the domain errors `NotFoundError` / `ConflictError`. |
 | `back/alembic/` | Alembic environment (`env.py`, `script.py.mako`). Alembic owns the database schema; the app never creates tables itself. |
 | `back/alembic/versions/` | Ordered migrations: `0001_initial`, `0002_meeting_times`, `0003_users`. |
