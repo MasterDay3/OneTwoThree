@@ -110,6 +110,14 @@ Resources:
                   - lambda:GetFunctionConfiguration
                   - lambda:InvokeFunction
                 Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-backend
+              # The weekly report builder runs the same image and moves to the same tag (infra/reports.yaml).
+              - Sid: LambdaReportBuilder
+                Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionCode
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-report-builder
               # aws s3 sync --delete of the built SPA.
               - Sid: S3List
                 Effect: Allow

@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
     seed: bool = False
 
+    # Weekly report (infra/reports.yaml): where the builder saves it and whose calendar weeks it counts.
+    reports_bucket: str = ""
+    report_timezone: str = "Europe/Kyiv"
+    # Lab exercise: the builder fails for this one ISO week, so its message ends up in the dead-letter queue.
+    report_fail_week: str = ""
+
     # Cognito user pool whose ID tokens the API accepts (`make aws-cognito-deploy` fills these in).
     # Empty pool ID = auth disabled: every request acts as one local user (local development, tests).
     cognito_region: str = "us-east-1"

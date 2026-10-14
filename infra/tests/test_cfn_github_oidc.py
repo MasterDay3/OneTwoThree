@@ -279,6 +279,7 @@ def test_statement_sids_are_exactly_the_fr18_set(by_sid):
         "EcrAuth",
         "EcrPush",
         "LambdaDeploy",
+        "LambdaReportBuilder",
         "S3List",
         "S3Objects",
         "CloudFrontInvalidate",

@@ -59,6 +59,13 @@ OIDC_STACK        := $(PROJECT)-github-oidc
 GITHUB_REPO       := MasterDay3/OneTwoThree
 FRONTEND_STACK    := $(PROJECT)-frontend
 COGNITO_STACK     := $(PROJECT)-cognito
+REPORTS_STACK     := $(PROJECT)-reports
+REPORT_BUILDER    := $(PROJECT)-report-builder
+# Weekly report: when it is built (Europe/Kyiv; REPORT_SCHEDULE='rate(5 minutes)' to test) and who gets it.
+REPORT_SCHEDULE   ?= cron(0 7 ? * MON *)
+REPORT_RECIPIENTS ?=
+# Lab exercise: REPORT_FAIL_WEEK=2026-W30 makes the builder fail for that week (its message goes to the DLQ).
+REPORT_FAIL_WEEK  ?=
 # Every resource gets this tag (in the templates and as a stack tag).
 STACK_TAGS        := PROJECT_NAME=$(PROJECT)
 
@@ -96,6 +103,7 @@ db_cluster_field = $(shell $(AWS_SHELL) rds describe-db-clusters --db-cluster-id
 frontend_output = $(call stack_output,$(FRONTEND_STACK),$(1))
 cognito_output  = $(call stack_output,$(COGNITO_STACK),$(1))
 backend_domain_output = $(call stack_output,$(BACKEND_DOMAIN_STACK),$(1))
+reports_output  = $(call stack_output,$(REPORTS_STACK),$(1))
 API_URL          = $(call backend_output,ApiUrl)
 # The SPA calls https://api.<domain>/ once the backend-domain stack exists, else the function URL.
 FRONTEND_API_URL = $(or $(call backend_domain_output,ApiUrl),$(API_URL))
@@ -120,6 +128,18 @@ define clear_failed_stack
 	@if [ "$$(aws cloudformation describe-stacks --stack-name $(1) --query 'Stacks[0].StackStatus' --output text 2>/dev/null)" = ROLLBACK_COMPLETE ]; then \
 	  echo "Stack $(1) is in ROLLBACK_COMPLETE after a failed create; deleting it before deploying again"; \
 	  aws cloudformation delete-stack --stack-name $(1) && aws cloudformation wait stack-delete-complete --stack-name $(1); \
+	fi
+endef
+
+# The report builder runs the backend image too (infra/reports.yaml), so it moves to the same tag.
+# Skipped while the reports stack does not exist.
+define update_report_builder
+	@if [ "$$(aws lambda get-function --function-name $(REPORT_BUILDER) --query Configuration.FunctionName \
+	    --output text 2>/dev/null)" = $(REPORT_BUILDER) ]; then \
+	  aws lambda wait function-updated-v2 --function-name $(REPORT_BUILDER) && \
+	  aws lambda update-function-code --function-name $(REPORT_BUILDER) --image-uri $(ECR_URI):$(TAG) \
+	    --query CodeSha256 --output text && \
+	  aws lambda wait function-updated-v2 --function-name $(REPORT_BUILDER); \
 	fi
 endef
 
@@ -272,6 +292,7 @@ aws-backend-update-code: ## Point the Lambda at image tag $(TAG) and wait until 
 	aws lambda update-function-code --function-name $(BACKEND_FUNCTION) --image-uri $(ECR_URI):$(TAG) \
 	  --query CodeSha256 --output text
 	aws lambda wait function-updated-v2 --function-name $(BACKEND_FUNCTION)
+	$(update_report_builder)
 
 .PHONY: aws-backend-migrate
 aws-backend-migrate: ## Run Alembic migrations (and seeding) inside the Lambda
@@ -290,6 +311,7 @@ aws-backend-rollback: require-rollback-tag aws-check ## Run an earlier image aga
 	aws lambda update-function-code --function-name $(BACKEND_FUNCTION) --image-uri $(ECR_URI):$(TAG) \
 	  --query CodeSha256 --output text
 	aws lambda wait function-updated-v2 --function-name $(BACKEND_FUNCTION)
+	$(update_report_builder)
 	@echo "Backend now runs $(TAG). Migrations are not rolled back."
 
 .PHONY: require-rollback-tag
@@ -540,13 +562,67 @@ aws-cognito-destroy: aws-check ## Delete the Cognito stack — ALL user accounts
 	aws cloudformation delete-stack --stack-name $(COGNITO_STACK)
 	aws cloudformation wait stack-delete-complete --stack-name $(COGNITO_STACK)
 
+##@ AWS weekly report (Scheduler/report-now -> SQS -> report-builder -> S3 -> report-mailer -> SES)
+
+.PHONY: aws-reports-stack
+aws-reports-stack: aws-check ## Create/update the report stack (builder runs the image the backend runs now; REPORT_RECIPIENTS from .env)
+	$(call clear_failed_stack,$(REPORTS_STACK))
+	@test -n "$(DOMAIN)" || { echo "DOMAIN is empty: reports are sent from reports@<DOMAIN>" >&2; exit 1; }
+	@test -n "$(REPORT_RECIPIENTS)" || { echo "REPORT_RECIPIENTS is empty: set it in .env (comma-separated)" >&2; exit 1; }
+	@test -n "$(call db_cluster_field,DbClusterResourceId)" || { echo "Aurora cluster not found: run \`make aws-db\` first"; exit 1; }
+	@image=$$(aws lambda get-function --function-name $(BACKEND_FUNCTION) --query Code.ImageUri --output text) \
+	  && [ -n "$$image" ] && [ "$$image" != None ] || { echo "No live backend image: deploy the backend first"; exit 1; }; \
+	echo "Deploying $(REPORTS_STACK) with $$image (schedule: $(REPORT_SCHEDULE))"; \
+	aws cloudformation deploy --stack-name $(REPORTS_STACK) --template-file infra/reports.yaml \
+	  --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset --tags $(STACK_TAGS) \
+	  --parameter-overrides ProjectName=$(PROJECT) "ImageUri=$$image" Architecture=$(LAMBDA_ARCH) \
+	    DbHost=$(call db_cluster_field,Endpoint) DbResourceId=$(call db_cluster_field,DbClusterResourceId) \
+	    DbUsername=$(call db_cluster_field,MasterUsername) Domain=$(DOMAIN) \
+	    "ReportRecipients=$(REPORT_RECIPIENTS)" "ScheduleExpression=$(REPORT_SCHEDULE)" \
+	    "FailWeek=$(REPORT_FAIL_WEEK)"
+	@$(MAKE) --no-print-directory aws-reports-dns
+
+.PHONY: aws-reports-dns
+aws-reports-dns: ## Show the 3 DKIM CNAME records for DOMAIN and whether SES has verified the sender and recipient
+	@echo "Add at the DNS provider of $(DOMAIN) (SES verifies the domain a few minutes later):"
+	@echo "  CNAME  $(call reports_output,DkimName1)  ->  $(call reports_output,DkimValue1)"
+	@echo "  CNAME  $(call reports_output,DkimName2)  ->  $(call reports_output,DkimValue2)"
+	@echo "  CNAME  $(call reports_output,DkimName3)  ->  $(call reports_output,DkimValue3)"
+	@for identity in $(DOMAIN) $(firstword $(subst $(COMMA), ,$(REPORT_RECIPIENTS))); do \
+	  echo "SES $$identity: $$(aws sesv2 get-email-identity --email-identity $$identity \
+	    --query VerificationStatus --output text 2>/dev/null)"; \
+	done
+
+.PHONY: report-now
+report-now: ## Ask for a report now: WEEK=2026-W39 (empty = last week). Sends a message to the report queue
+	@week='$(WEEK)'; \
+	[ -z "$$week" ] || [[ "$$week" =~ ^[0-9]{4}-W[0-9]{2}$$ ]] || { echo "WEEK must look like 2026-W39" >&2; exit 1; }; \
+	queue="$(call reports_output,QueueUrl)"; \
+	[ -n "$$queue" ] || { echo "Report stack not found: run \`make aws-reports-stack\` first" >&2; exit 1; }; \
+	if [ -n "$$week" ]; then body="{\"week\": \"$$week\", \"source\": \"make\"}"; \
+	else body='{"week": null, "source": "make"}'; fi; \
+	echo "Sending $$body"; \
+	aws sqs send-message --queue-url "$$queue" --message-body "$$body" --query MessageId --output text
+
+.PHONY: aws-reports-logs
+aws-reports-logs: ## Show the last hour of report-builder and report-mailer logs
+	aws logs tail /aws/lambda/$(REPORT_BUILDER) --since 1h
+	aws logs tail /aws/lambda/$(PROJECT)-report-mailer --since 1h
+
+.PHONY: aws-reports-destroy
+aws-reports-destroy: aws-check ## Empty the reports bucket and delete the report stack
+	@read -p "Delete stack $(REPORTS_STACK) and every saved report? [y/N] " ok && [ "$$ok" = y ]
+	@bucket="$(call reports_output,BucketName)"; [ -z "$$bucket" ] || aws s3 rm "s3://$$bucket" --recursive --quiet
+	aws cloudformation delete-stack --stack-name $(REPORTS_STACK)
+	aws cloudformation wait stack-delete-complete --stack-name $(REPORTS_STACK)
+
 ##@ AWS (all parts)
 
 .PHONY: aws-deploy
 aws-deploy: aws-cognito-deploy aws-backend-deploy aws-frontend-deploy ## Deploy everything: Cognito, backend, then the frontend built with their IDs and URL
 
 .PHONY: aws-destroy
-aws-destroy: aws-frontend-destroy aws-backend-domain-destroy aws-backend-destroy aws-cognito-destroy $(if $(DESTROY_OIDC),aws-oidc-destroy) ## Delete everything on AWS (each stack asks first; DESTROY_OIDC=1 also removes the CI role)
+aws-destroy: aws-reports-destroy aws-frontend-destroy aws-backend-domain-destroy aws-backend-destroy aws-cognito-destroy $(if $(DESTROY_OIDC),aws-oidc-destroy) ## Delete everything on AWS (each stack asks first; DESTROY_OIDC=1 also removes the CI role)
 
 ##@ Help
 
