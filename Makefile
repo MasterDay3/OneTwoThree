@@ -652,7 +652,9 @@ aws-ai-stack: aws-check ## Create/update the parser stack (runs the image the ba
 	  --parameter-overrides ProjectName=$(PROJECT) "ImageUri=$$image" Architecture=$(LAMBDA_ARCH) \
 	    ParserModel=$(PARSER_MODEL) CognitoUserPoolId=$(COGNITO_POOL_ID) CognitoClientId=$(COGNITO_CLIENT) \
 	    "AllowedOrigins=$(CORS_ORIGINS_AWS)" "BudgetEmail=$(BUDGET_EMAIL)"
-	@echo "Parser URL: $(call ai_output,ParserUrl)"
+	@# Looked up by the shell: make expands $(call ...) in a recipe before the stack exists.
+	@echo "Parser URL: $$(aws cloudformation describe-stacks --stack-name $(AI_STACK) \
+	  --query "Stacks[0].Outputs[?OutputKey=='ParserUrl'].OutputValue" --output text)"
 	@$(MAKE) --no-print-directory aws-frontend-publish
 
 .PHONY: aws-ai-logs
