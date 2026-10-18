@@ -1,5 +1,6 @@
 import { authEnabled, getIdToken, userManager } from "@/lib/auth"
 import type {
+  AgendaSave,
   Meeting,
   MeetingCreate,
   Participant,
@@ -74,6 +75,8 @@ export const api = {
   updateMeeting: ({ id, data }: { id: string; data: MeetingCreate }) =>
     request<Meeting>(`/meetings/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteMeeting: (id: string) => request<void>(`/meetings/${id}`, { method: "DELETE" }),
+  saveAgenda: ({ id, data }: { id: string; data: AgendaSave }) =>
+    request<Meeting>(`/meetings/${id}/agenda`, { method: "PUT", body: JSON.stringify(data) }),
 
   listParticipants: (q = "") =>
     request<Participant[]>(`/participants${q ? `?q=${encodeURIComponent(q)}` : ""}`),

@@ -12,6 +12,8 @@ from pydantic import (
     model_validator,
 )
 
+from app.ai.agenda import ActionItem, AgendaItem, ParsedAgenda
+
 
 def _blank_to_none(value: object) -> object:
     if isinstance(value, str) and not value.strip():
@@ -87,6 +89,26 @@ class MeetingCreate(BaseModel):
         return self
 
 
+class Agenda(BaseModel):
+    """A meeting's agenda as the user saved it: the same items the parser suggests."""
+
+    items: list[AgendaItem] = Field(default=[], max_length=50)
+    action_items: list[ActionItem] = Field(default=[], max_length=50)
+
+
+class AiSuggestion(BaseModel):
+    """What the parser suggested before the user checked it, and which model and prompt did it."""
+
+    agenda: ParsedAgenda
+    model: str = Field(min_length=1, max_length=100)
+    prompt_version: str = Field(min_length=1, max_length=50)
+
+
+class AgendaSave(Agenda):
+    # Sent when the agenda started from a parse. Typed by hand = null, which keeps any earlier one.
+    ai_suggestion: AiSuggestion | None = None
+
+
 class MeetingRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -99,4 +121,5 @@ class MeetingRead(BaseModel):
     ends_at: datetime
     owner_id: UUID | None
     participants: list[ParticipantRead]
+    agenda: Agenda | None
     created_at: datetime

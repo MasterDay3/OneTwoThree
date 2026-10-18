@@ -66,6 +66,12 @@ REPORT_SCHEDULE   ?= cron(0 7 ? * MON *)
 REPORT_RECIPIENTS ?=
 # Lab exercise: REPORT_FAIL_WEEK=2026-W30 makes the builder fail for that week (its message goes to the DLQ).
 REPORT_FAIL_WEEK  ?=
+# Paste an agenda (infra/ai.yml): the parser Lambda, the Claude model it calls, who gets the budget alarm.
+AI_STACK          := $(PROJECT)-ai
+AGENDA_PARSER     := $(PROJECT)-agenda-parser
+PARSER_MODEL      ?= anthropic.claude-opus-5-5
+export PARSER_MODEL
+BUDGET_EMAIL      ?=
 # Every resource gets this tag (in the templates and as a stack tag).
 STACK_TAGS        := PROJECT_NAME=$(PROJECT)
 
@@ -104,6 +110,7 @@ frontend_output = $(call stack_output,$(FRONTEND_STACK),$(1))
 cognito_output  = $(call stack_output,$(COGNITO_STACK),$(1))
 backend_domain_output = $(call stack_output,$(BACKEND_DOMAIN_STACK),$(1))
 reports_output  = $(call stack_output,$(REPORTS_STACK),$(1))
+ai_output       = $(call stack_output,$(AI_STACK),$(1))
 API_URL          = $(call backend_output,ApiUrl)
 # The SPA calls https://api.<domain>/ once the backend-domain stack exists, else the function URL.
 FRONTEND_API_URL = $(or $(call backend_domain_output,ApiUrl),$(API_URL))
@@ -131,17 +138,19 @@ define clear_failed_stack
 	fi
 endef
 
-# The report builder runs the backend image too (infra/reports.yaml), so it moves to the same tag.
-# Skipped while the reports stack does not exist.
-define update_report_builder
-	@if [ "$$(aws lambda get-function --function-name $(REPORT_BUILDER) --query Configuration.FunctionName \
-	    --output text 2>/dev/null)" = $(REPORT_BUILDER) ]; then \
-	  aws lambda wait function-updated-v2 --function-name $(REPORT_BUILDER) && \
-	  aws lambda update-function-code --function-name $(REPORT_BUILDER) --image-uri $(ECR_URI):$(TAG) \
+# The report builder (infra/reports.yaml) and the agenda parser (infra/ai.yml) run the backend image
+# too, so they move to the same tag. Each is skipped while its stack does not exist.
+define update_image_function
+	@if [ "$$(aws lambda get-function --function-name $(1) --query Configuration.FunctionName \
+	    --output text 2>/dev/null)" = $(1) ]; then \
+	  aws lambda wait function-updated-v2 --function-name $(1) && \
+	  aws lambda update-function-code --function-name $(1) --image-uri $(ECR_URI):$(TAG) \
 	    --query CodeSha256 --output text && \
-	  aws lambda wait function-updated-v2 --function-name $(REPORT_BUILDER); \
+	  aws lambda wait function-updated-v2 --function-name $(1); \
 	fi
 endef
+update_report_builder = $(call update_image_function,$(REPORT_BUILDER))
+update_agenda_parser  = $(call update_image_function,$(AGENDA_PARSER))
 
 TEST_DB_URL := postgresql+psycopg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(or $(DB_PORT),5432)/meetings_test
 
@@ -205,7 +214,7 @@ test-infra: ## Infra tests: Makefile, CloudFormation templates, scripts (stubbed
 lint: ## Code style checks (same as CI)
 	cd back && uv run ruff check . && uv run ruff format --check .
 	cd front && npm run lint && npm run format:check && npm run typecheck
-	uvx cfn-lint infra/*.yaml
+	uvx cfn-lint infra/*.yaml infra/*.yml
 
 .PHONY: format
 format: ## Auto-format backend and frontend
@@ -293,6 +302,7 @@ aws-backend-update-code: ## Point the Lambda at image tag $(TAG) and wait until 
 	  --query CodeSha256 --output text
 	aws lambda wait function-updated-v2 --function-name $(BACKEND_FUNCTION)
 	$(update_report_builder)
+	$(update_agenda_parser)
 
 .PHONY: aws-backend-migrate
 aws-backend-migrate: ## Run Alembic migrations (and seeding) inside the Lambda
@@ -312,6 +322,7 @@ aws-backend-rollback: require-rollback-tag aws-check ## Run an earlier image aga
 	  --query CodeSha256 --output text
 	aws lambda wait function-updated-v2 --function-name $(BACKEND_FUNCTION)
 	$(update_report_builder)
+	$(update_agenda_parser)
 	@echo "Backend now runs $(TAG). Migrations are not rolled back."
 
 .PHONY: require-rollback-tag
@@ -374,7 +385,7 @@ aws-frontend-stack: ## Create/update the frontend stack (S3, CloudFront + WAF on
 # Upload order: new hashed assets first, then the index.html that references them, and only then
 # delete old chunks, so a browser still holding the previous index.html never requests a missing file.
 .PHONY: aws-frontend-publish
-aws-frontend-publish: ## Build the SPA with VITE_API_URL=<api.<domain> or function URL>, upload it, invalidate CloudFront
+aws-frontend-publish: ## Build the SPA with VITE_API_URL=<api.<domain> or function URL> (and VITE_PARSER_URL once infra/ai.yml is up), upload it, invalidate CloudFront
 	@api="$(FRONTEND_API_URL)"; bucket="$(call frontend_output,BucketName)"; dist="$(call frontend_output,DistributionId)"; \
 	[ -n "$$api" ] || { echo "Backend not deployed: run \`make aws-backend-deploy\` first"; exit 1; }; \
 	[ -n "$$bucket" ] || { echo "Frontend stack not found: run \`make aws-frontend-stack\` first"; exit 1; }; \
@@ -383,7 +394,8 @@ aws-frontend-publish: ## Build the SPA with VITE_API_URL=<api.<domain> or functi
 	(cd front && npm ci --no-audit --no-fund && VITE_API_URL="$$api" \
 	  VITE_COGNITO_REGION=$(AWS_REGION) VITE_COGNITO_USER_POOL_ID=$(COGNITO_POOL_ID) \
 	  VITE_COGNITO_CLIENT_ID=$(COGNITO_CLIENT) VITE_COGNITO_DOMAIN=$(call cognito_output,HostedUiDomain) \
-	  VITE_COGNITO_GOOGLE=$(call cognito_output,GoogleEnabled) npm run build) && \
+	  VITE_COGNITO_GOOGLE=$(call cognito_output,GoogleEnabled) VITE_PARSER_URL=$(call ai_output,ParserUrl) \
+	  npm run build) && \
 	aws s3 sync front/dist "s3://$$bucket" --exclude index.html \
 	  --cache-control "public,max-age=31536000,immutable" && \
 	aws s3 cp front/dist/index.html "s3://$$bucket/index.html" --cache-control "no-cache" && \
@@ -616,13 +628,50 @@ aws-reports-destroy: aws-check ## Empty the reports bucket and delete the report
 	aws cloudformation delete-stack --stack-name $(REPORTS_STACK)
 	aws cloudformation wait stack-delete-complete --stack-name $(REPORTS_STACK)
 
+##@ Paste an agenda (browser -> agenda-parser Lambda -> Claude on Bedrock; saving goes through the API)
+
+.PHONY: llm-hello
+llm-hello: ## Call Claude on Bedrock once from this laptop (PARSER_MODEL) and print the answer, stop_reason and usage
+	cd back && uv run python -m app.ai.hello
+
+.PHONY: parse
+parse: ## Parse pasted text from this laptop: TEXT="Пн 10:00, синк ..." (PARSE_TZ=Europe/Kyiv). Prints the JSON and the usage
+	@test -n "$$TEXT" || { echo 'Usage: make parse TEXT="..."' >&2; exit 1; }
+	cd back && uv run python -m app.ai.agenda --tz "$(or $(PARSE_TZ),Europe/Kyiv)" "$$TEXT"
+
+.PHONY: aws-ai-stack
+aws-ai-stack: aws-check ## Create/update the parser stack (runs the image the backend runs now; BUDGET_EMAIL from .env), then rebuild the frontend with its URL
+	$(call clear_failed_stack,$(AI_STACK))
+	@test -n "$(BUDGET_EMAIL)" || { echo "BUDGET_EMAIL is empty: set it in .env (who gets the \$$5 budget alarm)" >&2; exit 1; }
+	@test -n "$(COGNITO_POOL_ID)" || { echo "Cognito not deployed: run \`make aws-cognito-deploy\` first" >&2; exit 1; }
+	@image=$$(aws lambda get-function --function-name $(BACKEND_FUNCTION) --query Code.ImageUri --output text) \
+	  && [ -n "$$image" ] && [ "$$image" != None ] || { echo "No live backend image: deploy the backend first"; exit 1; }; \
+	echo "Deploying $(AI_STACK) with $$image (model: $(PARSER_MODEL))"; \
+	aws cloudformation deploy --stack-name $(AI_STACK) --template-file infra/ai.yml \
+	  --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset --tags $(STACK_TAGS) \
+	  --parameter-overrides ProjectName=$(PROJECT) "ImageUri=$$image" Architecture=$(LAMBDA_ARCH) \
+	    ParserModel=$(PARSER_MODEL) CognitoUserPoolId=$(COGNITO_POOL_ID) CognitoClientId=$(COGNITO_CLIENT) \
+	    "AllowedOrigins=$(CORS_ORIGINS_AWS)" "BudgetEmail=$(BUDGET_EMAIL)"
+	@echo "Parser URL: $(call ai_output,ParserUrl)"
+	@$(MAKE) --no-print-directory aws-frontend-publish
+
+.PHONY: aws-ai-logs
+aws-ai-logs: ## Show the last hour of agenda-parser logs (one JSON line per parse: model, prompt, tokens, latency, cost)
+	aws logs tail /aws/lambda/$(AGENDA_PARSER) --since 1h
+
+.PHONY: aws-ai-destroy
+aws-ai-destroy: aws-check ## Delete the parser stack and the budget alarm (the frontend keeps working; rebuild it to hide the paste box)
+	@read -p "Delete stack $(AI_STACK)? [y/N] " ok && [ "$$ok" = y ]
+	aws cloudformation delete-stack --stack-name $(AI_STACK)
+	aws cloudformation wait stack-delete-complete --stack-name $(AI_STACK)
+
 ##@ AWS (all parts)
 
 .PHONY: aws-deploy
 aws-deploy: aws-cognito-deploy aws-backend-deploy aws-frontend-deploy ## Deploy everything: Cognito, backend, then the frontend built with their IDs and URL
 
 .PHONY: aws-destroy
-aws-destroy: aws-reports-destroy aws-frontend-destroy aws-backend-domain-destroy aws-backend-destroy aws-cognito-destroy $(if $(DESTROY_OIDC),aws-oidc-destroy) ## Delete everything on AWS (each stack asks first; DESTROY_OIDC=1 also removes the CI role)
+aws-destroy: aws-ai-destroy aws-reports-destroy aws-frontend-destroy aws-backend-domain-destroy aws-backend-destroy aws-cognito-destroy $(if $(DESTROY_OIDC),aws-oidc-destroy) ## Delete everything on AWS (each stack asks first; DESTROY_OIDC=1 also removes the CI role)
 
 ##@ Help
 

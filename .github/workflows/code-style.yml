@@ -80,7 +80,7 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
 
       - name: Lint CloudFormation templates
-        run: uvx cfn-lint --format parseable infra/*.yaml
+        run: uvx cfn-lint --format parseable infra/*.yaml infra/*.yml
 
   infra-tests:
     name: Infra tests (templates, Makefile deploy contract, workflows)

@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { toast } from "sonner"
 
+import { AgendaDialog } from "@/components/AgendaDialog"
 import { BackToTop } from "@/components/BackToTop"
 import { DeleteMeetingDialog } from "@/components/DeleteMeetingDialog"
 import { MeetingFormDialog } from "@/components/MeetingFormDialog"
@@ -19,6 +20,7 @@ export function HomePage() {
   const [formStart, setFormStart] = useState<Date | undefined>()
   const [editing, setEditing] = useState<Meeting | null>(null)
   const [pendingDelete, setPendingDelete] = useState<Meeting | null>(null)
+  const [agendaFor, setAgendaFor] = useState<Meeting | null>(null)
 
   const openForm = (start?: Date) => {
     setEditing(null)
@@ -68,6 +70,7 @@ export function HomePage() {
               meetings={meetings}
               onEdit={openEdit}
               onDelete={setPendingDelete}
+              onAgenda={setAgendaFor}
               onCreateAt={openForm}
             />
           )}
@@ -82,6 +85,12 @@ export function HomePage() {
         onOpenChange={setFormOpen}
         initialStart={formStart}
         meeting={editing}
+      />
+      <AgendaDialog
+        meeting={agendaFor}
+        onOpenChange={(open) => {
+          if (!open) setAgendaFor(null)
+        }}
       />
       <DeleteMeetingDialog
         meeting={pendingDelete}

@@ -58,6 +58,24 @@ describe("Home page", () => {
     expect(within(dialog).getByLabelText("End")).toHaveValue("15:00")
   })
 
+  it("shows a meeting's agenda and opens the agenda dialog from its details", async () => {
+    const withAgenda = {
+      ...sampleMeeting,
+      agenda: { items: [{ topic: "Demo", owner: "Olena", minutes: 10 }], action_items: [] },
+    }
+    mockFetch(() => ({ body: [withAgenda] }))
+    renderWithQuery(<App />, "/home")
+
+    await userEvent.click(await screen.findByRole("button", { name: /Sprint planning/ }))
+    expect(await screen.findByRole("list", { name: "Agenda" })).toHaveTextContent(
+      "Demo — Olena, 10 min",
+    )
+    await userEvent.click(screen.getByRole("button", { name: "Agenda of Sprint planning" }))
+
+    const dialog = await screen.findByRole("dialog", { name: "Agenda: Sprint planning" })
+    expect(within(dialog).getByLabelText("Topic 1")).toHaveValue("Demo")
+  })
+
   it("edits a meeting from its details", async () => {
     const fetchMock = mockFetch((_url, init) =>
       init?.method === "PUT"

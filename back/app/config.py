@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # Lab exercise: the builder fails for this one ISO week, so its message ends up in the dead-letter queue.
     report_fail_week: str = ""
 
+    # Paste an agenda (infra/ai.yml): the Claude model on Amazon Bedrock that parses pasted text.
+    parser_model: str = "anthropic.claude-opus-5-5"
+
     # Cognito user pool whose ID tokens the API accepts (`make aws-cognito-deploy` fills these in).
     # Empty pool ID = auth disabled: every request acts as one local user (local development, tests).
     cognito_region: str = "us-east-1"

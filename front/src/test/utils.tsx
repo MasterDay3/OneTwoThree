@@ -52,6 +52,7 @@ export const sampleMeeting: Meeting = {
   starts_at: todayAt(10).toISOString(),
   ends_at: todayAt(11).toISOString(),
   owner_id: "5d1e0c7a-2b3f-4c8d-9e0f-1a2b3c4d5e04",
+  agenda: null,
   created_at: "2026-09-21T10:00:00Z",
   participants: [
     { id: "3f1c2a9e-8b4d-4c1e-9a7f-2d5b6e8c1a01", name: "Anna", email: "anna@example.com" },

@@ -38,6 +38,7 @@ the pinned versions are specified in [PROJECT.md](PROJECT.md).
 | POST | `/api/meetings` | Create a meeting |
 | PUT | `/api/meetings/{id}` | Replace a meeting (same body as POST) |
 | DELETE | `/api/meetings/{id}` | Delete a meeting |
+| PUT | `/api/meetings/{id}/agenda` | Replace a meeting's agenda (topics, action items) and keep the AI suggestion it came from |
 | GET | `/api/participants?q=` | List/search participants |
 | POST | `/api/participants` | Create a participant (409 on duplicate email) |
 | DELETE | `/api/participants/{id}` | Delete a participant |
@@ -46,6 +47,16 @@ Everything except `/api/health` needs `Authorization: Bearer <Cognito ID token>`
 personal: each belongs to the user who created it (`owner_id`), and other users get 404 for it. The
 participant directory is shared. All IDs are UUIDs. A meeting needs a title, `starts_at` and `ends_at` (ISO 8601 with a timezone, end after start)
 and at least one of `call_link` or `place`.
+
+**Paste an agenda.** The agenda form can be filled in from pasted text (an email, a chat message,
+notes). The browser sends the text to a separate `agenda-parser` Lambda (`infra/ai.yml`, outside the
+API), which asks Claude on Amazon Bedrock for a structured agenda and returns it; the user checks it
+and saves it through `PUT /api/meetings/{id}/agenda`, like an agenda typed by hand. The parser never
+writes anything. `make llm-hello` checks model access from the laptop, `make parse TEXT="..."` runs
+the parser locally, `make aws-ai-stack` deploys it (needs `BUDGET_EMAIL` in `.env` for the $5 budget
+alarm) and rebuilds the frontend with its URL, and `make aws-ai-logs` shows one JSON line per parse
+(model, prompt version, tokens, latency, cost). Why it is built this way:
+[`docs/adr/0006-llm-agenda-parsing.md`](docs/adr/0006-llm-agenda-parsing.md).
 
 ## Sign-in (Cognito)
 
@@ -124,6 +135,7 @@ Everything is deployed to **us-east-1**. CloudFront accepts custom-domain certif
 - `infra/backend.yaml`: a Lambda function with a public **function URL** (the backend URL until a custom domain is set up, then a fallback) and an IAM role that may sign in to the database.
 - `infra/backend-domain.yaml`: API Gateway HTTP API on `api.<domain>` (regional ACM certificate, TLS 1.2, throttled) in front of the same Lambda.
 - `infra/github-oidc.yaml`: GitHub OIDC provider and the deploy role CI assumes (see [CI/CD](#cicd-github-actions--oidc)).
+- `infra/ai.yml`: the `agenda-parser` Lambda (the backend image, another handler) with a public, Cognito-checked function URL that calls Claude on Bedrock, outside any VPC, and a $5 monthly AWS Budgets alarm.
 - `infra/frontend.yaml`: private S3 bucket and CloudFront distribution for the SPA on the **flat-rate Free plan** ($0/month, with the WAF web ACL the plan requires), with an optional custom domain.
 
 Every resource carries the tag `PROJECT_NAME=<project>`. It is set in the templates and as a stack tag, and `cert.sh` puts it on the ACM certificate. Some resource types can't be tagged in AWS at all: function URLs, Lambda permissions, the bucket policy, the CloudFront origin access control, Route 53 records and the pricing plan subscription.
@@ -137,6 +149,9 @@ flowchart LR
     URL[Lambda function URL<br/>fallback] -.-> L
     L -->|:5432 TLS, IAM token| DB[(Aurora Serverless v2<br/>PostgreSQL, express configuration)]
     L -. image .-> ECR[ECR]
+    B -->|HTTPS POST pasted text, Cognito token| P[agenda-parser Lambda<br/>function URL, no VPC]
+    P -->|Messages API| BR[Amazon Bedrock<br/>Claude]
+    P -. image .-> ECR
 ```
 
 1. Sign in with an IAM user or role allowed to use CloudFormation, Lambda, ECR, RDS, S3, CloudFront, WAF, Pricing Plan Manager, ACM, Route 53, IAM and CloudWatch Logs. Prefer short-lived credentials: `aws sso login` (or `export AWS_PROFILE=...`). Credentials in the environment always win over `.env`; static keys in `.env` (`AWS_ACCESS_KEY_ID=...`, `AWS_SECRET_ACCESS_KEY=...`) still work for local use only and must never be committed. `make aws-check` shows who you are signed in as.

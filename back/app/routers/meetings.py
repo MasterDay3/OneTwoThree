@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.db import get_db
 from app.models import User
-from app.schemas import MeetingCreate, MeetingRead
+from app.schemas import AgendaSave, MeetingCreate, MeetingRead
 from app.services import meetings as service
 
 router = APIRouter(prefix="/meetings", tags=["meetings"])
@@ -37,6 +37,17 @@ def update_meeting(
     user: User = Depends(get_current_user),
 ):
     return service.update_meeting(db, meeting_id, data, user)
+
+
+@router.put("/{meeting_id}/agenda", response_model=MeetingRead)
+def save_agenda(
+    meeting_id: UUID,
+    data: AgendaSave,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Replace the agenda. The LLM parser never calls this; the browser does, after the user checked it."""
+    return service.save_agenda(db, meeting_id, data, user)
 
 
 @router.delete("/{meeting_id}", status_code=status.HTTP_204_NO_CONTENT)
