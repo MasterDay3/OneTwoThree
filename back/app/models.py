@@ -1,7 +1,9 @@
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import Column, DateTime, ForeignKey, Index, String, Table, Text, Uuid, func, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -49,6 +51,11 @@ class Meeting(Base):
     owner_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
+    # {"items": [...], "action_items": [...]} as saved by the user (PUT /api/meetings/{id}/agenda).
+    agenda: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # What the LLM parser suggested for it, with the model and prompt version: the difference between
+    # this and `agenda` is the parser's quality signal. Never shown back; read for evaluation only.
+    agenda_ai_suggestion: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

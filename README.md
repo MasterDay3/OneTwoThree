@@ -13,8 +13,8 @@ make start       # the same without watching (returns once the stack is healthy)
 make help        # all targets: logs, test, lint, format, clean, aws-*
 ```
 
-- App: http://localhost:3000 (sign in / sign up; the calendar is at `/home`). Until Cognito is set
-  up (see [Sign-in](#sign-in-cognito)), nothing is checked: any valid form opens the calendar and
+- App: http://localhost:3000 (the calendar is at `/home`, sign-in at `/login/`). Until Cognito is set
+  up (see [Sign-in](#sign-in-cognito)), nothing is checked: the calendar opens directly and
   everyone is one local user.
 - API docs: http://localhost:3000/api/docs (or http://localhost:8000/api/docs directly)
 
@@ -38,6 +38,7 @@ the pinned versions are specified in [PROJECT.md](PROJECT.md).
 | POST | `/api/meetings` | Create a meeting |
 | PUT | `/api/meetings/{id}` | Replace a meeting (same body as POST) |
 | DELETE | `/api/meetings/{id}` | Delete a meeting |
+| PUT | `/api/meetings/{id}/agenda` | Replace a meeting's agenda (topics, action items) and keep the AI suggestion it came from |
 | GET | `/api/participants?q=` | List/search participants |
 | POST | `/api/participants` | Create a participant (409 on duplicate email) |
 | DELETE | `/api/participants/{id}` | Delete a participant |
@@ -47,16 +48,26 @@ personal: each belongs to the user who created it (`owner_id`), and other users 
 participant directory is shared. All IDs are UUIDs. A meeting needs a title, `starts_at` and `ends_at` (ISO 8601 with a timezone, end after start)
 and at least one of `call_link` or `place`.
 
+**Paste an agenda.** The agenda form can be filled in from pasted text (an email, a chat message,
+notes). The browser sends the text to a separate `agenda-parser` Lambda (`infra/ai.tf`, outside the
+API), which asks Claude on Amazon Bedrock for a structured agenda and returns it; the user checks it
+and saves it through `PUT /api/meetings/{id}/agenda`, like an agenda typed by hand. The parser never
+writes anything. `make llm-hello` checks model access from the laptop, `make parse TEXT="..."` runs
+the parser locally, HCP Terraform deploys it with the rest of `infra/` (see
+[Infrastructure as code](#infrastructure-as-code-terraform-in-hcp-terraform)), and `make aws-ai-logs` shows one JSON line per parse
+(model, prompt version, tokens, latency, cost). Why it is built this way:
+[`docs/adr/0006-llm-agenda-parsing.md`](docs/adr/0006-llm-agenda-parsing.md).
+
 ## Sign-in (Cognito)
 
-The browser signs in with a Cognito user pool directly: email + password (sign-up sends a 6-digit
-code to confirm the email) and, once configured, Google through the Cognito Hosted UI. The API
+`/login/` redirects to Cognito's managed login (`react-oidc-context`, code flow with PKCE): email +
+password (sign-up sends a 6-digit code to confirm the email) and, once configured, Continue with
+Google. The browser comes back to `/auth/callback`, and the header shows the signed-in email. The API
 verifies the ID token's signature, issuer, audience and expiry against the pool's public keys and
 stores the user in the `users` table (keyed by the token's `sub`), where extra profile data lives.
 
 ```bash
-make aws-cognito-deploy   # user pool + app client + Hosted UI domain; prints the lines for .env
-make aws-cognito-env      # print them again
+make aws-cognito-env      # the user pool lives in infra/auth.tf (Terraform); prints the lines for .env
 ```
 
 Paste the printed `COGNITO_*` lines into `.env` and run `make up`. The local backend and frontend
@@ -65,9 +76,9 @@ every request acts as one local user (`dev@localhost`).
 
 **Google sign-in** (off until configured): create an OAuth client ID (type "Web application") in
 Google Cloud with the redirect URI `https://<COGNITO_DOMAIN>/oauth2/idpresponse`, set
-`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`, then run `make aws-cognito-deploy` again and
-copy `COGNITO_GOOGLE_ENABLED=true` into `.env`. On AWS, run `make aws-frontend-publish` to rebuild the
-frontend with it. Until then the Google button shows as "coming soon".
+`google_client_id` in `infra/terraform.tfvars` and `google_client_secret` as a **sensitive** variable of
+the HCP Terraform workspace (never in a file), merge, and
+copy `COGNITO_GOOGLE_ENABLED=true` into `.env`. Managed login then shows Continue with Google.
 
 On AWS the Lambda has no internet access, so `aws-backend-stack` downloads the pool's JWKS and passes
 it in as `COGNITO_JWKS`. Cognito does not rotate user pool signing keys. Meetings created before
@@ -116,14 +127,16 @@ Config lives in `back/pyproject.toml` (`[tool.ruff]`), `front/eslint.config.js` 
 
 ## Deploy to AWS (backend on Lambda + Aurora Serverless, frontend on CloudFront)
 
-Everything is deployed to **us-east-1**. CloudFront accepts custom-domain certificates only from that region. Infrastructure is CloudFormation in `infra/`:
+Everything is deployed to **us-east-1**. CloudFront accepts custom-domain certificates only from that region. The infrastructure is code in `infra/`: Terraform for Cognito, the weekly report and the agenda parser, and CloudFormation (one stack each) for the rest:
 
-- `infra/cognito.yaml`: Cognito user pool (email + password, self sign-up with email code), public app client, Hosted UI domain, and Google as an identity provider when `GOOGLE_CLIENT_ID` is set.
+- `infra/auth.tf` (Terraform): Cognito user pool (email + password, self sign-up with email code), public app client, Hosted UI domain, and Google as an identity provider when `google_client_id` is set.
 - `infra/backend-ecr.yaml`: ECR repository for the backend's Lambda container image (`back/Dockerfile.lambda`).
 - `make aws-db`: an Aurora Serverless v2 PostgreSQL cluster (scales to 0 ACU when idle) created with **express configuration**, the only kind of Aurora cluster the AWS Free plan allows. It has no VPC: it is reached through Aurora's internet access gateway, and only with IAM authentication tokens. CloudFormation can't create such clusters, so the AWS CLI does.
 - `infra/backend.yaml`: a Lambda function with a public **function URL** (the backend URL until a custom domain is set up, then a fallback) and an IAM role that may sign in to the database.
 - `infra/backend-domain.yaml`: API Gateway HTTP API on `api.<domain>` (regional ACM certificate, TLS 1.2, throttled) in front of the same Lambda.
 - `infra/github-oidc.yaml`: GitHub OIDC provider and the deploy role CI assumes (see [CI/CD](#cicd-github-actions--oidc)).
+- `infra/reports.tf` (Terraform): the weekly report: EventBridge Scheduler → SQS + DLQ → `report-builder` Lambda → S3 → `report-mailer` Lambda → SES.
+- `infra/ai.tf` (Terraform): the `agenda-parser` Lambda (the backend image, another handler) with a public, Cognito-checked function URL that calls Claude on Bedrock, outside any VPC, and a $5 monthly AWS Budgets alarm.
 - `infra/frontend.yaml`: private S3 bucket and CloudFront distribution for the SPA on the **flat-rate Free plan** ($0/month, with the WAF web ACL the plan requires), with an optional custom domain.
 
 Every resource carries the tag `PROJECT_NAME=<project>`. It is set in the templates and as a stack tag, and `cert.sh` puts it on the ACM certificate. Some resource types can't be tagged in AWS at all: function URLs, Lambda permissions, the bucket policy, the CloudFront origin access control, Route 53 records and the pricing plan subscription.
@@ -137,6 +150,9 @@ flowchart LR
     URL[Lambda function URL<br/>fallback] -.-> L
     L -->|:5432 TLS, IAM token| DB[(Aurora Serverless v2<br/>PostgreSQL, express configuration)]
     L -. image .-> ECR[ECR]
+    B -->|HTTPS POST pasted text, Cognito token| P[agenda-parser Lambda<br/>function URL, no VPC]
+    P -->|Messages API| BR[Amazon Bedrock<br/>Claude]
+    P -. image .-> ECR
 ```
 
 1. Sign in with an IAM user or role allowed to use CloudFormation, Lambda, ECR, RDS, S3, CloudFront, WAF, Pricing Plan Manager, ACM, Route 53, IAM and CloudWatch Logs. Prefer short-lived credentials: `aws sso login` (or `export AWS_PROFILE=...`). Credentials in the environment always win over `.env`; static keys in `.env` (`AWS_ACCESS_KEY_ID=...`, `AWS_SECRET_ACCESS_KEY=...`) still work for local use only and must never be committed. `make aws-check` shows who you are signed in as.
@@ -145,16 +161,39 @@ flowchart LR
 3. Deploy. The first run takes about 15 minutes, mostly waiting for Aurora and CloudFront:
 
    ```bash
-   make aws-deploy   # = aws-cognito-deploy, aws-backend-deploy, then aws-frontend-deploy
+   make aws-deploy   # = aws-backend-deploy, then aws-frontend-deploy (infra/*.tf applied in HCP Terraform first)
    ```
 
    The steps run in this order:
 
-   1. **Cognito** (`make aws-cognito-deploy`): user pool, app client and Hosted UI domain. Redirect URLs cover localhost and the site's origins. It prints the `.env` lines for local use.
+   1. **Terraform** (`infra/*.tf`, applied by HCP Terraform): Cognito, the weekly report and the agenda parser. Redirect URLs and the parser's CORS come from `app_origins` in `infra/terraform.tfvars`.
    2. **Backend** (`make aws-backend-deploy`): ECR stack → build and push the Lambda image → backend stack → `aws-backend-migrate` invokes the function with `{"action": "migrate"}` to run Alembic and seeding. It prints the function URL (`https://<id>.lambda-url.us-east-1.on.aws/`).
    3. **Frontend** (`make aws-frontend-deploy`): frontend stack → `npm run build` with `VITE_API_URL=<function URL>` and the `VITE_COGNITO_*` IDs → upload to S3 and invalidate CloudFront → allow the site's origin in the backend's `CORS_ORIGINS` and as a Cognito redirect URL. It prints the site URL.
 
 Other targets: `make aws-backend-outputs`, `aws-backend-status`, `aws-backend-logs`, `aws-backend-health`, `aws-backend-migrate`, `aws-frontend-outputs`, `aws-frontend-publish` (rebuild and upload the frontend only), `aws-destroy`. Use `ARCH=amd64` to build an x86 Lambda instead of Graviton (`arm64`, the default). Use `CLOUDFRONT_PLAN=PAY_AS_YOU_GO` if the account can't subscribe to the Free plan (accounts on the AWS Free Tier are not eligible, and each account gets at most 3 free plans).
+
+### Infrastructure as code: Terraform in HCP Terraform
+
+`infra/versions.tf`, `variables.tf`, `auth.tf`, `reports.tf`, `ai.tf` and `outputs.tf` are one root
+module. Its state and its runs live in the HCP Terraform workspace `meetings-dev` (Remote execution),
+connected to this repository with `infra` as the working directory: a pull request gets a plan as a
+check, and a merge to `main` applies it. HCP Terraform reaches AWS with **dynamic credentials**: each
+run gets a signed OIDC token and exchanges it for the role created by `infra/bootstrap/` (applied once
+from a laptop, local state). Nobody needs AWS keys to change the infrastructure.
+
+```bash
+terraform login        # once: an HCP Terraform token in ~/.terraform.d/credentials.tfrc.json
+make infra-init        # terraform init (remote state)
+make infra-check       # fmt -check + validate
+make infra-plan        # a speculative plan in HCP Terraform; it never applies
+make infra-outputs     # Cognito IDs, queue URL, parser URL, DKIM records
+```
+
+The Makefile has no `terraform apply`: applies happen in HCP Terraform after a merge. Non-secret values
+are in `infra/terraform.tfvars`. `google_client_secret` (sensitive), `budget_email` and
+`report_recipients` are variables of the workspace. CI reads the outputs (for the frontend build) with
+the `TF_API_TOKEN` secret. The report builder and the parser ignore `image_uri`: CI moves them to each
+new backend image. Why Terraform: [`docs/adr/0007-terraform.md`](docs/adr/0007-terraform.md).
 
 ### Custom domains: `app.<domain>` and `api.<domain>` (optional)
 

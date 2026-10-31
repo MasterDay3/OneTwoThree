@@ -58,7 +58,15 @@ BACKEND_DOMAIN_STACK := $(PROJECT)-backend-domain
 OIDC_STACK        := $(PROJECT)-github-oidc
 GITHUB_REPO       := MasterDay3/OneTwoThree
 FRONTEND_STACK    := $(PROJECT)-frontend
-COGNITO_STACK     := $(PROJECT)-cognito
+REPORT_BUILDER    := $(PROJECT)-report-builder
+# Paste an agenda: the parser Lambda and the Claude model `make llm-hello` / `make parse` call.
+AGENDA_PARSER     := $(PROJECT)-agenda-parser
+PARSER_MODEL      ?= anthropic.claude-opus-5-5
+export PARSER_MODEL
+# Cognito, the weekly report and the agenda parser are Terraform (infra/*.tf, state and runs in HCP
+# Terraform). The Makefile only plans and reads outputs: applies happen in HCP Terraform after a merge.
+TERRAFORM         ?= terraform
+TF_DIR            := infra
 # Every resource gets this tag (in the templates and as a stack tag).
 STACK_TAGS        := PROJECT_NAME=$(PROJECT)
 
@@ -94,18 +102,15 @@ backend_output  = $(call stack_output,$(BACKEND_STACK),$(1))
 db_cluster_field = $(shell $(AWS_SHELL) rds describe-db-clusters --db-cluster-identifier $(DB_CLUSTER) \
                      --query "DBClusters[0].$(1)" --output text 2>/dev/null)
 frontend_output = $(call stack_output,$(FRONTEND_STACK),$(1))
-cognito_output  = $(call stack_output,$(COGNITO_STACK),$(1))
 backend_domain_output = $(call stack_output,$(BACKEND_DOMAIN_STACK),$(1))
+tf_output       = $(shell cd $(TF_DIR) && $(TERRAFORM) output -raw $(1) 2>/dev/null)
 API_URL          = $(call backend_output,ApiUrl)
 # The SPA calls https://api.<domain>/ once the backend-domain stack exists, else the function URL.
 FRONTEND_API_URL = $(or $(call backend_domain_output,ApiUrl),$(API_URL))
 FRONTEND_ORIGINS = $(call frontend_output,SiteOrigins)
 CORS_ORIGINS_AWS = $(CORS_LOCAL)$(if $(FRONTEND_ORIGINS),$(COMMA)$(FRONTEND_ORIGINS))
-# Cognito may redirect back (Google sign-in) to every origin the API allows.
-COGNITO_CALLBACK_URLS = $(subst $(COMMA),/auth/callback$(COMMA),$(CORS_ORIGINS_AWS))/auth/callback
-COGNITO_LOGOUT_URLS   = $(subst $(COMMA),/$(COMMA),$(CORS_ORIGINS_AWS))/
-COGNITO_POOL_ID   = $(call cognito_output,UserPoolId)
-COGNITO_CLIENT    = $(call cognito_output,UserPoolClientId)
+COGNITO_POOL_ID   = $(call tf_output,cognito_user_pool_id)
+COGNITO_CLIENT    = $(call tf_output,cognito_client_id)
 FRONTEND_CERT_ARN = $(if $(FRONTEND_DOMAIN),$(shell $(LOAD_ENV) $(CERT_SH) arn $(FRONTEND_DOMAIN) 2>/dev/null))
 FRONTEND_ZONE_ID  = $(shell $(LOAD_ENV) $(CERT_SH) zone-id $(FRONTEND_DOMAIN) 2>/dev/null)
 BACKEND_CERT_ARN  = $(if $(BACKEND_DOMAIN),$(shell $(LOAD_ENV) $(CERT_SH) arn $(BACKEND_DOMAIN) 2>/dev/null))
@@ -122,6 +127,20 @@ define clear_failed_stack
 	  aws cloudformation delete-stack --stack-name $(1) && aws cloudformation wait stack-delete-complete --stack-name $(1); \
 	fi
 endef
+
+# The report builder (infra/reports.tf) and the agenda parser (infra/ai.tf) run the backend image
+# too, so they move to the same tag (Terraform ignores image_uri). Each is skipped while it does not exist.
+define update_image_function
+	@if [ "$$(aws lambda get-function --function-name $(1) --query Configuration.FunctionName \
+	    --output text 2>/dev/null)" = $(1) ]; then \
+	  aws lambda wait function-updated-v2 --function-name $(1) && \
+	  aws lambda update-function-code --function-name $(1) --image-uri $(ECR_URI):$(TAG) \
+	    --query CodeSha256 --output text && \
+	  aws lambda wait function-updated-v2 --function-name $(1); \
+	fi
+endef
+update_report_builder = $(call update_image_function,$(REPORT_BUILDER))
+update_agenda_parser  = $(call update_image_function,$(AGENDA_PARSER))
 
 TEST_DB_URL := postgresql+psycopg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:$(or $(DB_PORT),5432)/meetings_test
 
@@ -185,7 +204,7 @@ test-infra: ## Infra tests: Makefile, CloudFormation templates, scripts (stubbed
 lint: ## Code style checks (same as CI)
 	cd back && uv run ruff check . && uv run ruff format --check .
 	cd front && npm run lint && npm run format:check && npm run typecheck
-	uvx cfn-lint infra/*.yaml
+	uvx cfn-lint infra/*.yaml infra/*.yml
 
 .PHONY: format
 format: ## Auto-format backend and frontend
@@ -247,7 +266,7 @@ aws-db: ## Create the Aurora Serverless v2 cluster once (express configuration: 
 aws-backend-stack: ## Create/update the backend stack (Lambda + function URL) with image tag $(TAG); KEEP_IMAGE=1 keeps the image running now
 	$(call clear_failed_stack,$(BACKEND_STACK))
 	@test -n "$(ECR_URI)" || { echo "ECR repository not found: run \`make aws-backend-ecr\` first (and check AWS credentials in .env)"; exit 1; }
-	@test -n "$(COGNITO_POOL_ID)" || { echo "Cognito not deployed: run \`make aws-cognito-deploy\` first"; exit 1; }
+	@test -n "$(COGNITO_POOL_ID)" || { echo "Cognito not deployed: no Terraform outputs: make infra-init (after terraform login), and apply infra/ in HCP Terraform"; exit 1; }
 	@test -n "$(call db_cluster_field,DbClusterResourceId)" || { echo "Aurora cluster not found: run \`make aws-db\` first"; exit 1; }
 	@# The pool's signing keys are passed in with the stack, so requests never wait on downloading them.
 	@# KEEP_IMAGE=1 passes the image the Lambda runs now: deploy-backend/rollback change it outside
@@ -255,7 +274,7 @@ aws-backend-stack: ## Create/update the backend stack (Lambda + function URL) wi
 	$(if $(KEEP_IMAGE),image=$$(aws lambda get-function --function-name $(BACKEND_FUNCTION) \
 	  --query Code.ImageUri --output text) || exit 1; [ -n "$$image" ] && [ "$$image" != None ] \
 	  || { echo "No live Lambda image found: deploy the backend first"; exit 1; };,image=$(ECR_URI):$(TAG);) \
-	jwks=$$(curl -fsS "$(call cognito_output,Issuer)/.well-known/jwks.json") && \
+	jwks=$$(curl -fsS "$(call tf_output,cognito_issuer)/.well-known/jwks.json") && \
 	aws cloudformation deploy --stack-name $(BACKEND_STACK) --template-file infra/backend.yaml \
 	  --capabilities CAPABILITY_IAM --no-fail-on-empty-changeset --tags $(STACK_TAGS) \
 	  --parameter-overrides ProjectName=$(PROJECT) "ImageUri=$$image" \
@@ -272,6 +291,8 @@ aws-backend-update-code: ## Point the Lambda at image tag $(TAG) and wait until 
 	aws lambda update-function-code --function-name $(BACKEND_FUNCTION) --image-uri $(ECR_URI):$(TAG) \
 	  --query CodeSha256 --output text
 	aws lambda wait function-updated-v2 --function-name $(BACKEND_FUNCTION)
+	$(update_report_builder)
+	$(update_agenda_parser)
 
 .PHONY: aws-backend-migrate
 aws-backend-migrate: ## Run Alembic migrations (and seeding) inside the Lambda
@@ -290,6 +311,8 @@ aws-backend-rollback: require-rollback-tag aws-check ## Run an earlier image aga
 	aws lambda update-function-code --function-name $(BACKEND_FUNCTION) --image-uri $(ECR_URI):$(TAG) \
 	  --query CodeSha256 --output text
 	aws lambda wait function-updated-v2 --function-name $(BACKEND_FUNCTION)
+	$(update_report_builder)
+	$(update_agenda_parser)
 	@echo "Backend now runs $(TAG). Migrations are not rolled back."
 
 .PHONY: require-rollback-tag
@@ -352,16 +375,17 @@ aws-frontend-stack: ## Create/update the frontend stack (S3, CloudFront + WAF on
 # Upload order: new hashed assets first, then the index.html that references them, and only then
 # delete old chunks, so a browser still holding the previous index.html never requests a missing file.
 .PHONY: aws-frontend-publish
-aws-frontend-publish: ## Build the SPA with VITE_API_URL=<api.<domain> or function URL>, upload it, invalidate CloudFront
+aws-frontend-publish: ## Build the SPA with VITE_API_URL=<api.<domain> or function URL> (and VITE_PARSER_URL from infra/ai.tf), upload it, invalidate CloudFront
 	@api="$(FRONTEND_API_URL)"; bucket="$(call frontend_output,BucketName)"; dist="$(call frontend_output,DistributionId)"; \
 	[ -n "$$api" ] || { echo "Backend not deployed: run \`make aws-backend-deploy\` first"; exit 1; }; \
 	[ -n "$$bucket" ] || { echo "Frontend stack not found: run \`make aws-frontend-stack\` first"; exit 1; }; \
-	[ -n "$(COGNITO_POOL_ID)" ] || { echo "Cognito not deployed: run \`make aws-cognito-deploy\` first"; exit 1; }; \
+	[ -n "$(COGNITO_POOL_ID)" ] || { echo "Cognito not deployed: no Terraform outputs: make infra-init (after terraform login), and apply infra/ in HCP Terraform"; exit 1; }; \
 	echo "Building frontend with VITE_API_URL=$$api" && \
 	(cd front && npm ci --no-audit --no-fund && VITE_API_URL="$$api" \
 	  VITE_COGNITO_REGION=$(AWS_REGION) VITE_COGNITO_USER_POOL_ID=$(COGNITO_POOL_ID) \
-	  VITE_COGNITO_CLIENT_ID=$(COGNITO_CLIENT) VITE_COGNITO_DOMAIN=$(call cognito_output,HostedUiDomain) \
-	  VITE_COGNITO_GOOGLE=$(call cognito_output,GoogleEnabled) npm run build) && \
+	  VITE_COGNITO_CLIENT_ID=$(COGNITO_CLIENT) VITE_COGNITO_DOMAIN=$(call tf_output,cognito_hosted_ui_domain) \
+	  VITE_COGNITO_GOOGLE=$(call tf_output,cognito_google_enabled) VITE_PARSER_URL=$(call tf_output,parser_url) \
+	  npm run build) && \
 	aws s3 sync front/dist "s3://$$bucket" --exclude index.html \
 	  --cache-control "public,max-age=31536000,immutable" && \
 	aws s3 cp front/dist/index.html "s3://$$bucket/index.html" --cache-control "no-cache" && \
@@ -371,9 +395,9 @@ aws-frontend-publish: ## Build the SPA with VITE_API_URL=<api.<domain> or functi
 	  --query "Invalidation.Status" --output text
 
 .PHONY: aws-frontend-cors
-aws-frontend-cors: ## Allow the frontend's origins in the backend's CORS settings and as Cognito redirect URLs (keeps the current image)
+aws-frontend-cors: ## Allow the frontend's origins in the backend's CORS settings (keeps the current image); Cognito's: app_origins in infra/terraform.tfvars
 	@$(MAKE) --no-print-directory aws-backend-stack KEEP_IMAGE=1
-	@$(MAKE) --no-print-directory aws-cognito-stack
+	@echo "Cognito redirect URLs and the parser's CORS: add $(FRONTEND_ORIGINS) to app_origins in infra/terraform.tfvars, open a PR."
 
 .PHONY: aws-frontend-outputs
 aws-frontend-outputs: ## Show frontend stack outputs (site URL, bucket, distribution)
@@ -499,54 +523,85 @@ aws-oidc-destroy: aws-check ## Delete the deploy role stack (the account's GitHu
 	aws cloudformation delete-stack --stack-name $(OIDC_STACK)
 	aws cloudformation wait stack-delete-complete --stack-name $(OIDC_STACK)
 
-##@ AWS auth (Cognito user pool; Google sign-in once GOOGLE_CLIENT_ID/SECRET are set in .env)
+##@ Infrastructure as code (Cognito, weekly report, agenda parser: infra/*.tf in HCP Terraform)
 
-.PHONY: aws-cognito-deploy
-aws-cognito-deploy: aws-check aws-cognito-stack aws-cognito-env ## Deploy Cognito, then print the lines to add to .env
-	@echo "Then: \`make up\` for local sign-in; on AWS \`make aws-deploy\` (or aws-backend-stack KEEP_IMAGE=1 + aws-frontend-publish)."
+.PHONY: infra-init
+infra-init: ## terraform init in infra/ (needs `terraform login` once: the state lives in HCP Terraform)
+	cd $(TF_DIR) && $(TERRAFORM) init -input=false
 
-.PHONY: aws-cognito-stack
-aws-cognito-stack: ## Create/update the Cognito stack (redirect URLs = local origins + the site's)
-	$(call clear_failed_stack,$(COGNITO_STACK))
-	@# Not echoed: the command line would show the Google client secret.
-	@echo "Deploying $(COGNITO_STACK) (Google sign-in: $(if $(GOOGLE_CLIENT_ID),on,off))"
-	@aws cloudformation deploy --stack-name $(COGNITO_STACK) --template-file infra/cognito.yaml \
-	  --no-fail-on-empty-changeset --tags $(STACK_TAGS) \
-	  --parameter-overrides ProjectName=$(PROJECT) "CallbackUrls=$(COGNITO_CALLBACK_URLS)" \
-	    "LogoutUrls=$(COGNITO_LOGOUT_URLS)" "GoogleClientId=$(GOOGLE_CLIENT_ID)" \
-	    "GoogleClientSecret=$(GOOGLE_CLIENT_SECRET)"
+.PHONY: infra-check
+infra-check: ## terraform fmt -check and validate (touches nothing in the cloud)
+	cd $(TF_DIR) && $(TERRAFORM) fmt -check -recursive && $(TERRAFORM) validate
+
+.PHONY: infra-plan
+infra-plan: ## Plan infra/ in HCP Terraform (a speculative run: it never applies). Apply = merge to main
+	cd $(TF_DIR) && $(TERRAFORM) plan -input=false
+
+.PHONY: infra-outputs
+infra-outputs: ## Show the Terraform outputs (Cognito IDs, report queue, parser URL, DKIM records)
+	cd $(TF_DIR) && $(TERRAFORM) output
 
 .PHONY: aws-cognito-env
-aws-cognito-env: ## Print the .env lines for the deployed user pool (replace the empty COGNITO_* ones)
-	@test -n "$(COGNITO_POOL_ID)" || { echo "Cognito stack not found: run \`make aws-cognito-deploy\` first"; exit 1; }
+aws-cognito-env: ## Print the .env lines for the user pool (replace the empty COGNITO_* ones)
+	@test -n "$(COGNITO_POOL_ID)" || { echo "No Terraform outputs: run \`make infra-init\` (and \`terraform login\`) first"; exit 1; }
 	@echo
 	@echo "Add to .env (replacing the empty COGNITO_* lines):"
 	@echo
 	@echo "COGNITO_REGION=$(AWS_REGION)"
 	@echo "COGNITO_USER_POOL_ID=$(COGNITO_POOL_ID)"
 	@echo "COGNITO_CLIENT_ID=$(COGNITO_CLIENT)"
-	@echo "COGNITO_DOMAIN=$(call cognito_output,HostedUiDomain)"
-	@echo "COGNITO_GOOGLE_ENABLED=$(call cognito_output,GoogleEnabled)"
+	@echo "COGNITO_DOMAIN=$(call tf_output,cognito_hosted_ui_domain)"
+	@echo "COGNITO_GOOGLE_ENABLED=$(call tf_output,cognito_google_enabled)"
 	@echo
 
-.PHONY: aws-cognito-outputs
-aws-cognito-outputs: ## Show Cognito stack outputs (pool, client, Hosted UI domain)
-	@aws cloudformation describe-stacks --stack-name $(COGNITO_STACK) \
-	  --query "Stacks[0].Outputs[].[OutputKey, OutputValue]" --output table
+##@ AWS weekly report (Scheduler/report-now -> SQS -> report-builder -> S3 -> report-mailer -> SES)
 
-.PHONY: aws-cognito-destroy
-aws-cognito-destroy: aws-check ## Delete the Cognito stack — ALL user accounts are deleted with it
-	@read -p "Delete stack $(COGNITO_STACK) and every user account in it? [y/N] " ok && [ "$$ok" = y ]
-	aws cloudformation delete-stack --stack-name $(COGNITO_STACK)
-	aws cloudformation wait stack-delete-complete --stack-name $(COGNITO_STACK)
+.PHONY: aws-reports-dns
+aws-reports-dns: ## Show the 3 DKIM CNAME records for the mail domain and whether SES has verified the sender and recipient
+	@cd $(TF_DIR) && $(TERRAFORM) output -json ses_dkim_records
+	@for identity in $(DOMAIN) $(firstword $(subst $(COMMA), ,$(REPORT_RECIPIENTS))); do \
+	  echo "SES $$identity: $$(aws sesv2 get-email-identity --email-identity $$identity \
+	    --query VerificationStatus --output text 2>/dev/null)"; \
+	done
+
+.PHONY: report-now
+report-now: ## Ask for a report now: WEEK=2026-W39 (empty = last week). Sends a message to the report queue
+	@week='$(WEEK)'; \
+	[ -z "$$week" ] || [[ "$$week" =~ ^[0-9]{4}-W[0-9]{2}$$ ]] || { echo "WEEK must look like 2026-W39" >&2; exit 1; }; \
+	queue="$(call tf_output,reports_queue_url)"; \
+	[ -n "$$queue" ] || { echo "No Terraform outputs: run \`make infra-init\` first" >&2; exit 1; }; \
+	if [ -n "$$week" ]; then body="{\"week\": \"$$week\", \"source\": \"make\"}"; \
+	else body='{"week": null, "source": "make"}'; fi; \
+	echo "Sending $$body"; \
+	aws sqs send-message --queue-url "$$queue" --message-body "$$body" --query MessageId --output text
+
+.PHONY: aws-reports-logs
+aws-reports-logs: ## Show the last hour of report-builder and report-mailer logs
+	aws logs tail /aws/lambda/$(REPORT_BUILDER) --since 1h
+	aws logs tail /aws/lambda/$(PROJECT)-report-mailer --since 1h
+
+##@ Paste an agenda (browser -> agenda-parser Lambda -> Claude on Bedrock; saving goes through the API)
+
+.PHONY: llm-hello
+llm-hello: ## Call Claude on Bedrock once from this laptop (PARSER_MODEL) and print the answer, stop_reason and usage
+	cd back && uv run python -m app.ai.hello
+
+.PHONY: parse
+parse: ## Parse pasted text from this laptop: TEXT="Пн 10:00, синк ..." (PARSE_TZ=Europe/Kyiv). Prints the JSON and the usage
+	@test -n "$$TEXT" || { echo 'Usage: make parse TEXT="..."' >&2; exit 1; }
+	cd back && uv run python -m app.ai.agenda --tz "$(or $(PARSE_TZ),Europe/Kyiv)" "$$TEXT"
+
+.PHONY: aws-ai-logs
+aws-ai-logs: ## Show the last hour of agenda-parser logs (one JSON line per parse: model, prompt, tokens, latency, cost)
+	aws logs tail /aws/lambda/$(AGENDA_PARSER) --since 1h
 
 ##@ AWS (all parts)
 
 .PHONY: aws-deploy
-aws-deploy: aws-cognito-deploy aws-backend-deploy aws-frontend-deploy ## Deploy everything: Cognito, backend, then the frontend built with their IDs and URL
+aws-deploy: aws-check aws-backend-deploy aws-frontend-deploy ## Deploy the backend, then the frontend built with its URL and the Terraform outputs (apply infra/ in HCP Terraform first)
 
 .PHONY: aws-destroy
-aws-destroy: aws-frontend-destroy aws-backend-domain-destroy aws-backend-destroy aws-cognito-destroy $(if $(DESTROY_OIDC),aws-oidc-destroy) ## Delete everything on AWS (each stack asks first; DESTROY_OIDC=1 also removes the CI role)
+aws-destroy: aws-frontend-destroy aws-backend-domain-destroy aws-backend-destroy $(if $(DESTROY_OIDC),aws-oidc-destroy) ## Delete the CloudFormation stacks (each asks first; DESTROY_OIDC=1 also removes the CI role). infra/*.tf: a destroy run in HCP Terraform
 
 ##@ Help
 

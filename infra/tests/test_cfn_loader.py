@@ -3,7 +3,7 @@
 
 import pytest
 
-EXISTING_TEMPLATES = ["backend-ecr.yaml", "backend.yaml", "cognito.yaml", "frontend.yaml"]
+EXISTING_TEMPLATES = ["backend-ecr.yaml", "backend.yaml", "frontend.yaml"]
 
 
 @pytest.mark.parametrize("name", EXISTING_TEMPLATES)

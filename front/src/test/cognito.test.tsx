@@ -1,119 +1,99 @@
 import { screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { User, UserManager } from "oidc-client-ts"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import App from "@/App"
 import { api } from "@/lib/api"
-import { getIdToken, signIn } from "@/lib/auth"
-import { mockFetch, renderWithQuery, signInForTest } from "@/test/utils"
+import { logoutUrl, userManager } from "@/lib/auth"
+import { mockFetch, renderWithQuery } from "@/test/utils"
 
-const COGNITO = "https://cognito-idp.us-east-1.amazonaws.com/"
-const tokens = { IdToken: "id-token", RefreshToken: "refresh-token", ExpiresIn: 3600 }
+const POOL = "us-east-1_abc123"
+const CLIENT = "client-123"
+const DOMAIN = "meetings.auth.us-east-1.amazoncognito.com"
 
-/** Cognito request body and action of a fetch call. */
-function cognitoCall(call: unknown[]) {
-  const init = call[1] as RequestInit
-  const headers = init.headers as Record<string, string>
-  return { action: headers["X-Amz-Target"], body: JSON.parse(String(init.body)) }
+/** A signed-in user in localStorage, as oidc-client-ts stores it after the code exchange. */
+function storeUser() {
+  const user = new User({
+    id_token: "id-token",
+    access_token: "access-token",
+    refresh_token: "refresh-token",
+    token_type: "Bearer",
+    scope: "openid email profile",
+    profile: {
+      sub: "sub-1",
+      iss: `https://cognito-idp.us-east-1.amazonaws.com/${POOL}`,
+      aud: CLIENT,
+      exp: 0,
+      iat: 0,
+      email: "anna@example.com",
+    },
+    expires_at: Math.floor(Date.now() / 1000) + 3600,
+  })
+  localStorage.setItem(
+    `oidc.user:https://cognito-idp.us-east-1.amazonaws.com/${POOL}:${CLIENT}`,
+    user.toStorageString(),
+  )
 }
 
 describe("with Cognito configured", () => {
   beforeEach(() => {
     vi.stubEnv("VITE_COGNITO_REGION", "us-east-1")
-    vi.stubEnv("VITE_COGNITO_CLIENT_ID", "client-123")
-    vi.stubEnv("VITE_COGNITO_DOMAIN", "meetings.auth.us-east-1.amazoncognito.com")
+    vi.stubEnv("VITE_COGNITO_USER_POOL_ID", POOL)
+    vi.stubEnv("VITE_COGNITO_CLIENT_ID", CLIENT)
+    vi.stubEnv("VITE_COGNITO_DOMAIN", DOMAIN)
   })
 
-  it("signs in with Cognito and sends the ID token to the API", async () => {
-    const fetchMock = mockFetch((url) =>
-      url === COGNITO ? { body: { AuthenticationResult: tokens } } : { body: [] },
-    )
-    await signIn("anna@example.com", "secret123")
+  it("configures the OIDC client for the user pool", () => {
+    const { settings } = userManager()
+    expect(settings.authority).toBe(`https://cognito-idp.us-east-1.amazonaws.com/${POOL}`)
+    expect(settings.client_id).toBe(CLIENT)
+    expect(settings.redirect_uri).toBe(`${window.location.origin}/auth/callback`)
+    expect(settings.scope).toBe("openid email profile")
+    expect(settings.response_type).toBe("code")
+  })
 
-    const { action, body } = cognitoCall(fetchMock.mock.calls[0])
-    expect(action).toBe("AWSCognitoIdentityProviderService.InitiateAuth")
-    expect(body).toEqual({
-      ClientId: "client-123",
-      AuthFlow: "USER_PASSWORD_AUTH",
-      AuthParameters: { USERNAME: "anna@example.com", PASSWORD: "secret123" },
-    })
+  it("shows a Sign in button in the header when signed out", async () => {
+    mockFetch(() => ({ body: [] }))
+    renderWithQuery(<App />, "/home")
+    expect(await screen.findByRole("link", { name: "Sign in" })).toHaveAttribute("href", "/login")
+    expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument()
+  })
+
+  it("starts the redirect to Cognito as soon as /login/ loads", async () => {
+    const redirect = vi.spyOn(UserManager.prototype, "signinRedirect").mockResolvedValue()
+    mockFetch(() => ({ body: [] }))
+    renderWithQuery(<App />, "/login/")
+    await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1))
+  })
+
+  it("shows the signed-in email and sends the ID token to the API", async () => {
+    storeUser()
+    const fetchMock = mockFetch(() => ({ body: [] }))
+    renderWithQuery(<App />, "/home")
+    expect(await screen.findByText("anna@example.com")).toBeInTheDocument()
 
     await api.listMeetings()
     const apiCall = fetchMock.mock.calls.find(([url]) => url === "/api/meetings")
     expect((apiCall?.[1]?.headers as Record<string, string>).Authorization).toBe("Bearer id-token")
   })
 
-  it("refreshes an expiring token", async () => {
-    signInForTest({ idToken: "old", refreshToken: "refresh-token", expiresAt: Date.now() + 1000 })
-    const fetchMock = mockFetch(() => ({
-      body: { AuthenticationResult: { IdToken: "new", ExpiresIn: 3600 } },
-    }))
-
-    expect(await getIdToken()).toBe("new")
-    expect(cognitoCall(fetchMock.mock.calls[0]).body.AuthFlow).toBe("REFRESH_TOKEN_AUTH")
-    expect(JSON.parse(localStorage.getItem("meetings.session")!).refreshToken).toBe("refresh-token")
+  it("signs out locally, then through Cognito's logout endpoint", async () => {
+    storeUser()
+    const remove = vi.spyOn(UserManager.prototype, "removeUser")
+    mockFetch(() => ({ body: [] }))
+    renderWithQuery(<App />, "/home")
+    await userEvent.click(await screen.findByRole("button", { name: "Sign out" }))
+    await waitFor(() => expect(remove).toHaveBeenCalled())
+    expect(await screen.findByRole("link", { name: "Sign in" })).toBeInTheDocument()
+    expect(logoutUrl()).toBe(
+      `https://${DOMAIN}/logout?client_id=${CLIENT}&logout_uri=${encodeURIComponent(`${window.location.origin}/`)}`,
+    )
   })
 
-  it("shows Cognito's error on a wrong password", async () => {
-    mockFetch(() => ({
-      status: 400,
-      body: { __type: "NotAuthorizedException", message: "Incorrect username or password." },
-    }))
-    renderWithQuery(<App />, "/")
-    await userEvent.type(screen.getByLabelText("Email"), "anna@example.com")
-    await userEvent.type(screen.getByLabelText("Password"), "wrong")
-    await userEvent.click(screen.getByRole("button", { name: "Sign in" }))
-    expect(await screen.findByRole("alert")).toHaveTextContent("Incorrect email or password")
-  })
-
-  it("signs up, confirms with the emailed code, then asks to sign in", async () => {
-    const fetchMock = mockFetch(() => ({ body: {} }))
-    renderWithQuery(<App />, "/signup")
-    await userEvent.type(screen.getByLabelText("Name"), "Anna")
-    await userEvent.type(screen.getByLabelText("Email"), "anna@example.com")
-    await userEvent.type(screen.getByLabelText("Password"), "password1")
-    await userEvent.type(screen.getByLabelText("Confirm password"), "password1")
-    await userEvent.click(screen.getByRole("button", { name: "Create account" }))
-
-    expect(await screen.findByRole("heading", { name: "Check your email" })).toBeInTheDocument()
-    expect(cognitoCall(fetchMock.mock.calls[0]).body).toMatchObject({
-      Username: "anna@example.com",
-      UserAttributes: [
-        { Name: "email", Value: "anna@example.com" },
-        { Name: "name", Value: "Anna" },
-      ],
-    })
-
-    await userEvent.type(screen.getByLabelText("Confirmation code"), "123456")
-    await userEvent.click(screen.getByRole("button", { name: "Confirm account" }))
-
-    expect(await screen.findByText(/Account confirmed/)).toBeInTheDocument()
-    expect(screen.getByLabelText("Email")).toHaveValue("anna@example.com")
-    const confirm = cognitoCall(fetchMock.mock.calls[1])
-    expect(confirm.action).toBe("AWSCognitoIdentityProviderService.ConfirmSignUp")
-    expect(confirm.body.ConfirmationCode).toBe("123456")
-  })
-
-  it("sends an unconfirmed account to the code page", async () => {
-    mockFetch(() => ({ status: 400, body: { __type: "UserNotConfirmedException", message: "" } }))
-    renderWithQuery(<App />, "/")
-    await userEvent.type(screen.getByLabelText("Email"), "anna@example.com")
-    await userEvent.type(screen.getByLabelText("Password"), "password1")
-    await userEvent.click(screen.getByRole("button", { name: "Sign in" }))
-    expect(await screen.findByRole("heading", { name: "Check your email" })).toBeInTheDocument()
-  })
-
-  it("enables Google only when the pool has it", () => {
-    vi.stubEnv("VITE_COGNITO_GOOGLE", "true")
-    mockFetch(() => ({ body: {} }))
-    renderWithQuery(<App />, "/")
-    expect(screen.getByRole("button", { name: "Continue with Google" })).toBeEnabled()
-    expect(screen.queryByText("Google sign-in is coming soon.")).not.toBeInTheDocument()
-  })
-
-  it("rejects an OAuth callback it did not start", async () => {
-    mockFetch(() => ({ body: {} }))
-    renderWithQuery(<App />, "/auth/callback?code=abc&state=forged")
-    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Sign-in failed"))
+  it("shows an error when the callback has no code", async () => {
+    mockFetch(() => ({ body: [] }))
+    renderWithQuery(<App />, "/auth/callback")
+    expect(await screen.findByRole("alert")).toHaveTextContent("Sign-in failed")
   })
 })

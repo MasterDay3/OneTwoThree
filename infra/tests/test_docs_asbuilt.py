@@ -42,7 +42,7 @@ def test_lambda_handler_docstring_names_both_entry_points(repo_root):
 def test_project_md_mentions_every_template_and_workflow(repo_root):
     """TC-3.1(f): the as-built completeness check."""
     text = _read(repo_root, "PROJECT.md")
-    files = [*repo_root.glob("infra/*.yaml"), *repo_root.glob(".github/workflows/*.yml")]
+    files = [*repo_root.glob("infra/*.y*ml"), *repo_root.glob(".github/workflows/*.yml")]
     missing = [f.name for f in files if f.name not in text]
     assert not missing
 

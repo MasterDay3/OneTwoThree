@@ -51,25 +51,31 @@ environments and caches are in `.gitignore`).
 | Folder | Purpose |
 | --- | --- |
 | `.github/` | GitHub configuration; holds only CI workflows. |
-| `.github/workflows/` | `code-style.yml`: Ruff on `back/`, ESLint + Prettier + `tsc` on `front/`, cfn-lint on `infra/*.yaml`, and the `infra/tests` suite; runs on pull requests and as the first stage of `deploy.yml`. `deploy.yml`: on every push to `main`, lint + backend and frontend tests, then `make deploy-backend` and `make deploy-frontend` with short-lived AWS credentials from GitHub OIDC. |
+| `.github/workflows/` | `code-style.yml`: Ruff on `back/`, ESLint + Prettier + `tsc` on `front/`, cfn-lint on `infra/*.yaml` and `infra/*.yml`, and the `infra/tests` suite; runs on pull requests and as the first stage of `deploy.yml`. `deploy.yml`: on every push to `main`, lint + backend and frontend tests, then `make deploy-backend` and `make deploy-frontend` with short-lived AWS credentials from GitHub OIDC. |
 | `back/` | Backend: FastAPI app, Alembic migrations, tests, `pyproject.toml` + `uv.lock`, `Dockerfile` (Compose) and `Dockerfile.lambda` (AWS Lambda image). |
-| `back/app/` | The Python package `app`: `main.py` (FastAPI app, CORS, 404/409 error handlers), `config.py` (settings from env), `db.py` (engine, session), `models.py` (SQLAlchemy tables), `schemas.py` (Pydantic request/response models = the API contract), `auth.py` (Cognito ID-token check), `seed.py` (sample participants), `lambda_handler.py` (Mangum entry point + `migrate` action). |
+| `back/app/` | The Python package `app`: `main.py` (FastAPI app, CORS, 404/409 error handlers), `config.py` (settings from env), `db.py` (engine, session), `models.py` (SQLAlchemy tables), `schemas.py` (Pydantic request/response models = the API contract), `auth.py` (Cognito ID-token check), `seed.py` (sample participants), `lambda_handler.py` (Mangum entry point + `migrate` action), `reports/` (`weekly.py`: the weekly report as CSV; `lambda_handler.py`: the `report-builder` Lambda entry point), `ai/` (Paste an agenda: the LLM parser and its Lambda entry point). |
+| `back/app/ai/` | Paste an agenda (`infra/ai.tf`): `agenda.py` turns pasted text into a `ParsedAgenda` with Claude on Amazon Bedrock (tool call, validation, one retry) with no Lambda in it, and holds the agenda schema the API reuses; `agenda_lambda.py` is the `agenda-parser` Lambda (function URL, Cognito token, 10,000-character limit, one JSON log line per parse); `hello.py` is `make llm-hello`. |
 | `back/app/routers/` | HTTP layer only: one module per resource (`health`, `me`, `meetings`, `participants`), mounted under `/api` in `main.py`. |
+| `back/app/reports/` | The weekly meetings report (`infra/reports.tf`): `weekly.py` builds one ISO week as CSV with no AWS in it; `lambda_handler.py` is the `report-builder` Lambda (SQS or direct invocation → S3). |
 | `back/app/services/` | Business logic and queries used by the routers (`meetings`, `participants`, `users`) and the domain errors `NotFoundError` / `ConflictError`. |
 | `back/alembic/` | Alembic environment (`env.py`, `script.py.mako`). Alembic owns the database schema; the app never creates tables itself. |
-| `back/alembic/versions/` | Ordered migrations: `0001_initial`, `0002_meeting_times`, `0003_users`. |
-| `back/tests/` | Backend pytest suite (`test_api.py`, `test_auth.py`) against a real PostgreSQL database named by `TEST_DATABASE_URL`. Excluded from the Docker build context by `back/.dockerignore`. |
-| `docs/` | `lab2-discussion.md`: answers to the lab's discussion questions, grounded in this repository's files. |
+| `back/alembic/versions/` | Ordered migrations: `0001_initial`, `0002_meeting_times`, `0003_users`, `0004_meeting_agenda`. |
+| `back/tests/` | Backend pytest suite (`test_api.py`, `test_auth.py`, `test_agenda.py` with a fake Bedrock client) against a real PostgreSQL database named by `TEST_DATABASE_URL`. Excluded from the Docker build context by `back/.dockerignore`. |
+| `docs/` | `lab2-discussion.md`: answers to the lab's discussion questions, grounded in this repository's files. `lab5-answers.md`: the weekly report lab's Step 7 results and written answers. |
+| `docs/adr/` | Architecture decision records: `0006-llm-agenda-parsing.md` (why the agenda parser runs outside the VPC and never writes), with the updated C4 container diagram. |
 | `front/` | Frontend: Vite + React + TypeScript + Tailwind + shadcn/ui; `package.json` + `package-lock.json`, lint/format/TS config, `Dockerfile` (build with Node, serve with nginx) and `nginx.conf`. |
 | `front/src/` | App entry (`main.tsx`, `App.tsx` with the routes), `types.ts` (TypeScript mirror of the API schemas), global CSS. |
-| `front/src/pages/` | One component per route: `LoginPage` (`/`), `SignUpPage` (`/signup`), `ConfirmPage` (`/confirm`), `AuthCallbackPage` (`/auth/callback`), `HomePage` (`/home`, the calendar; needs sign-in). |
-| `front/src/components/` | App components: `MeetingsCalendar`, `MeetingFormDialog`, `DeleteMeetingDialog`, `ParticipantsMultiSelect`, header/footer, `BackToTop`. |
-| `front/src/components/auth/` | Sign-in building blocks: `AuthLayout`, `GoogleButton`, `PasswordInput`, `RequireAuth` (route guard). |
+| `front/src/pages/` | One component per route: `LoginPage` (`/login`, redirects to Cognito's managed login), `AuthCallbackPage` (`/auth/callback`), `HomePage` (`/home`, the calendar; needs sign-in). |
+| `front/src/components/` | App components: `MeetingsCalendar`, `MeetingFormDialog`, `AgendaDialog` (Paste an agenda + the agenda form), `DeleteMeetingDialog`, `ParticipantsMultiSelect`, header/footer, `BackToTop`. |
+| `front/src/components/auth/` | Sign-in building blocks: `AuthLayout`, `RequireAuth` (route guard; shows the header's Sign in button when signed out). |
 | `front/src/components/ui/` | Generated shadcn/ui primitives (buttons, dialogs, inputs…); regenerated with the shadcn CLI rather than hand-edited. |
-| `front/src/hooks/` | TanStack Query hooks: `useMeetings`, `useParticipants`, `useMe`. |
-| `front/src/lib/` | Non-UI modules: `api.ts` (typed fetch wrapper, adds the Bearer token), `auth.ts` (Cognito sign-in/up, session, Google via Hosted UI + PKCE), `calendar.ts` (date helpers, overlap layout), `participants.ts`, `utils.ts`. |
+| `front/src/hooks/` | TanStack Query hooks `useMeetings`, `useParticipants`; `useSession` (who is signed in). |
+| `front/src/lib/` | Non-UI modules: `api.ts` (typed fetch wrapper, adds the Bearer token), `auth.ts` (OIDC client for Cognito managed login, ID token for the API, Cognito logout), `agendaParser.ts` (calls the agenda parser's function URL, maps its errors to messages), `calendar.ts` (date helpers, overlap layout), `participants.ts`, `utils.ts`. |
 | `front/src/test/` | Vitest + Testing Library tests and their setup. |
-| `infra/` | CloudFormation templates, one stack each: `cognito.yaml`, `backend-ecr.yaml`, `backend.yaml` (Lambda + function URL; the Aurora Serverless v2 cluster itself is created by `make aws-db`), `frontend.yaml` (S3 + CloudFront + WAF), `backend-domain.yaml` (API Gateway HTTP API on `api.<domain>` in front of the Lambda), `github-oidc.yaml` (GitHub OIDC provider + the CI deploy role); `backend.params.example.env` (optional parameter overrides). |
+| `infra/` | Terraform (one root module, state and runs in HCP Terraform; see `docs/adr/0007-terraform.md`): `versions.tf` (providers, default `PROJECT_NAME` tag), `variables.tf`, `auth.tf` (Cognito user pool, app client, managed-login domain, Google provider), `reports.tf` (weekly meetings report: EventBridge Scheduler → SQS + DLQ → `report-builder` Lambda → S3 → `report-mailer` Lambda → SES; the mailer's code is `lambda/report_mailer/index.py`), `ai.tf` (Paste an agenda: the `agenda-parser` Lambda + public function URL calling Claude on Bedrock, outside any VPC, and the $5 monthly AWS Budgets alarm), `outputs.tf`, `terraform.tfvars` (non-secret values); `bootstrap/` (the IAM OIDC provider and role HCP Terraform runs as; local state, applied once). CloudFormation templates, one stack each: `backend-ecr.yaml`, `backend.yaml` (Lambda + function URL; the Aurora Serverless v2 cluster itself is created by `make aws-db`), `frontend.yaml` (S3 + CloudFront + WAF), `backend-domain.yaml` (API Gateway HTTP API on `api.<domain>` in front of the Lambda), `github-oidc.yaml` (GitHub OIDC provider + the CI deploy role); `backend.params.example.env` (optional parameter overrides). |
+| `infra/bootstrap/` | Terraform applied once from a laptop (local state, gitignored): the IAM OIDC provider for `app.terraform.io` and the role that runs of the HCP Terraform workspace `meetings-dev` assume (dynamic credentials). |
+| `infra/lambda/` | Code of the zip Lambda functions Terraform packages (`archive_file`), one folder each. |
+| `infra/lambda/report_mailer/` | `index.py`: the `report-mailer` Lambda; emails each new `reports/<week>.csv` in the bucket through SES. |
 | `infra/scripts/` | `cert.sh`: ACM certificate and DNS helper for the custom domains (`app.` and `api.`), called by the `Makefile`. |
 | `infra/tests/` | Python checks for the repository's non-application parts (this document, the `Makefile`, the templates). |
 
@@ -215,6 +221,7 @@ it starts"). Both fail with 422.
 | `ends_at` | `datetime` | ISO 8601 with offset. |
 | `owner_id` | `UUID \| None` | The creator's user ID. `null` only for meetings created before accounts existed; nobody sees those. |
 | `participants` | `list[ParticipantRead]` | Sorted by name. |
+| `agenda` | `Agenda \| None` | `{"items": [{topic, owner, minutes}], "action_items": [{task, owner, due}]}`; `null` until one is saved through `PUT /api/meetings/{id}/agenda`. |
 | `created_at` | `datetime` | Set by the database. |
 
 ### Nested — `ParticipantRead`
@@ -331,6 +338,7 @@ backend images resolve the ranges at build time.
 | `pydantic-settings` | `>=2.3` | `back/pyproject.toml` |
 | `mangum` | `>=0.19` | `back/pyproject.toml` |
 | `pyjwt[crypto]` | `>=2.9` | `back/pyproject.toml` |
+| `anthropic[bedrock]` | `>=1.15` | `back/pyproject.toml` |
 | `pytest` | `>=8` | `back/pyproject.toml` |
 | `httpx` | `>=0.27` | `back/pyproject.toml` |
 | `ruff` | `>=0.6` | `back/pyproject.toml` |

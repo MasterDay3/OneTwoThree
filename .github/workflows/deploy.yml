@@ -116,6 +116,18 @@ jobs:
       - name: Guard against a .env in the checkout
         run: test ! -f .env || { echo "unexpected .env in CI checkout"; exit 1; }
 
+      # Read-only use of Terraform: the frontend build reads infra/'s outputs (Cognito IDs, parser URL)
+      # from the state in HCP Terraform. Applies happen in HCP Terraform itself, never here.
+      # No wrapper: it would add its own lines to `terraform output -raw`.
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.17.1
+          terraform_wrapper: false
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Terraform init (outputs only)
+        run: make infra-init
+
       - name: Deploy backend (image tagged with the commit SHA)
         env:
           TAG: ${{ github.sha }}

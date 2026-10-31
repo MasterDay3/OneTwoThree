@@ -1,31 +1,13 @@
 import { screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { beforeEach, describe, expect, it } from "vitest"
+import { describe, expect, it } from "vitest"
 
 import App from "@/App"
 import { formatLongDay, layoutDay } from "@/lib/calendar"
 import { parseNewParticipant } from "@/lib/participants"
-import { mockFetch, renderWithQuery, sampleMeeting, signInForTest, todayAt } from "@/test/utils"
+import { mockFetch, renderWithQuery, sampleMeeting, todayAt } from "@/test/utils"
 
 describe("Home page", () => {
-  beforeEach(() => signInForTest())
-
-  it("sends signed-out users to sign in", async () => {
-    localStorage.clear()
-    mockFetch(() => ({ body: [] }))
-    renderWithQuery(<App />, "/home")
-    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument()
-  })
-
-  it("shows the signed-in user and signs out", async () => {
-    mockFetch(() => ({ body: [] }))
-    renderWithQuery(<App />, "/home")
-    expect(await screen.findByText("Anna Kovalenko")).toBeInTheDocument()
-    await userEvent.click(screen.getByRole("button", { name: "Sign out" }))
-    expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument()
-    expect(localStorage.getItem("meetings.session")).toBeNull()
-  })
-
   it("shows meetings in the week calendar with details on click", async () => {
     mockFetch(() => ({ body: [sampleMeeting] }))
     renderWithQuery(<App />, "/home")
@@ -74,6 +56,24 @@ describe("Home page", () => {
     const dialog = await screen.findByRole("dialog")
     expect(within(dialog).getByLabelText("Start")).toHaveValue("14:00")
     expect(within(dialog).getByLabelText("End")).toHaveValue("15:00")
+  })
+
+  it("shows a meeting's agenda and opens the agenda dialog from its details", async () => {
+    const withAgenda = {
+      ...sampleMeeting,
+      agenda: { items: [{ topic: "Demo", owner: "Olena", minutes: 10 }], action_items: [] },
+    }
+    mockFetch(() => ({ body: [withAgenda] }))
+    renderWithQuery(<App />, "/home")
+
+    await userEvent.click(await screen.findByRole("button", { name: /Sprint planning/ }))
+    expect(await screen.findByRole("list", { name: "Agenda" })).toHaveTextContent(
+      "Demo — Olena, 10 min",
+    )
+    await userEvent.click(screen.getByRole("button", { name: "Agenda of Sprint planning" }))
+
+    const dialog = await screen.findByRole("dialog", { name: "Agenda: Sprint planning" })
+    expect(within(dialog).getByLabelText("Topic 1")).toHaveValue("Demo")
   })
 
   it("edits a meeting from its details", async () => {

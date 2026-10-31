@@ -23,13 +23,6 @@ export const sampleUser: User = {
   name: "Anna Kovalenko",
 }
 
-/** A stored session, as after signing in (with auth disabled, as in tests by default). */
-export function signInForTest(
-  session: object = { idToken: "", expiresAt: Number.MAX_SAFE_INTEGER },
-) {
-  localStorage.setItem("meetings.session", JSON.stringify(session))
-}
-
 /** Replaces global fetch; returns the mock so tests can inspect calls. `/api/me` always
  * answers with `sampleUser`. */
 export function mockFetch(handler: Handler) {
@@ -59,6 +52,7 @@ export const sampleMeeting: Meeting = {
   starts_at: todayAt(10).toISOString(),
   ends_at: todayAt(11).toISOString(),
   owner_id: "5d1e0c7a-2b3f-4c8d-9e0f-1a2b3c4d5e04",
+  agenda: null,
   created_at: "2026-09-21T10:00:00Z",
   participants: [
     { id: "3f1c2a9e-8b4d-4c1e-9a7f-2d5b6e8c1a01", name: "Anna", email: "anna@example.com" },

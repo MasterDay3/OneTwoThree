@@ -44,7 +44,7 @@ DISTRIBUTION_ARN = (
 )
 STACK_ARN_PREFIX = "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/"
 FORBIDDEN_PREFIXES = ("iam:", "cognito-idp:", "cognito-identity:", "acm:", "route53:", "sts:")
-STACK_SUFFIXES = ["backend-ecr", "backend", "backend-domain", "frontend", "cognito"]
+STACK_SUFFIXES = ["backend-ecr", "backend", "backend-domain", "frontend", "cognito", "ai"]
 
 
 # --------------------------------------------------------------------------- helpers
@@ -279,6 +279,8 @@ def test_statement_sids_are_exactly_the_fr18_set(by_sid):
         "EcrAuth",
         "EcrPush",
         "LambdaDeploy",
+        "LambdaReportBuilder",
+        "LambdaAgendaParser",
         "S3List",
         "S3Objects",
         "CloudFrontInvalidate",
@@ -313,3 +315,15 @@ def test_resources_are_tagged_with_project_name(provider, role):
     for _, res in (provider, role):
         tags = res["Properties"]["Tags"]
         assert {"Key": "PROJECT_NAME", "Value": {"Ref": "ProjectName"}} in tags
+
+
+def test_agenda_parser_statement_only_moves_its_image(by_sid):
+    stmt = by_sid["LambdaAgendaParser"]
+    assert set(stmt["Action"]) == {
+        "lambda:UpdateFunctionCode",
+        "lambda:GetFunction",
+        "lambda:GetFunctionConfiguration",
+    }
+    assert [_sub_string(r) for r in _as_list(stmt["Resource"])] == [
+        "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-agenda-parser"
+    ]

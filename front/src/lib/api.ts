@@ -1,5 +1,6 @@
-import { getIdToken, signOut } from "@/lib/auth"
+import { authEnabled, getIdToken, userManager } from "@/lib/auth"
 import type {
+  AgendaSave,
   Meeting,
   MeetingCreate,
   Participant,
@@ -45,9 +46,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     },
   })
 
-  // Session gone or rejected: back to the sign-in page.
-  if (response.status === 401) {
-    signOut()
+  // Session gone or rejected: drop it and go back to the signed-out page.
+  if (response.status === 401 && authEnabled()) {
+    await userManager().removeUser()
     window.location.assign("/")
   }
 
@@ -74,6 +75,8 @@ export const api = {
   updateMeeting: ({ id, data }: { id: string; data: MeetingCreate }) =>
     request<Meeting>(`/meetings/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   deleteMeeting: (id: string) => request<void>(`/meetings/${id}`, { method: "DELETE" }),
+  saveAgenda: ({ id, data }: { id: string; data: AgendaSave }) =>
+    request<Meeting>(`/meetings/${id}/agenda`, { method: "PUT", body: JSON.stringify(data) }),
 
   listParticipants: (q = "") =>
     request<Participant[]>(`/participants${q ? `?q=${encodeURIComponent(q)}` : ""}`),

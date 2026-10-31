@@ -67,8 +67,8 @@ def test_rollback_recipe_has_no_migration(repo_root):
 
 def _backend_stack_stubs(sandbox):
     _ecr(sandbox)
-    sandbox.stub("aws", match=["describe-stacks", "meetings-cognito", "UserPoolId"], stdout="us-east-1_pool")
-    sandbox.stub("aws", match=["describe-stacks", "meetings-cognito", "Issuer"], stdout="https://issuer")
+    sandbox.stub("terraform", match=["output", "cognito_user_pool_id"], stdout="us-east-1_pool")
+    sandbox.stub("terraform", match=["output", "cognito_issuer"], stdout="https://issuer")
     sandbox.stub("aws", match=["rds", "describe-db-clusters"], stdout="cluster-ABC")
 
 
@@ -192,7 +192,7 @@ def test_oidc_deploy_clears_failed_stacks(repo_root):
 
 def _destroy_order(sandbox, **vars):
     out = sandbox.run("aws-destroy", vars=vars, dry_run=True).stdout
-    names = ["meetings-frontend", "meetings-backend-domain", "meetings-backend", "meetings-cognito"]
+    names = ["meetings-frontend", "meetings-backend-domain", "meetings-backend"]
     return out, [re.search(rf"delete-stack --stack-name {n}\s", out).start() for n in names]
 
 
@@ -204,5 +204,6 @@ def test_destroy_order_and_oidc_opt_in(sandbox):
 
     out, _ = _destroy_order(sandbox, DESTROY_OIDC="1")
     assert out.index("delete-stack --stack-name meetings-github-oidc") > out.index(
-        "delete-stack --stack-name meetings-cognito"
+        "delete-stack --stack-name meetings-backend\n"
     )
+    assert "meetings-cognito" not in out, "Cognito is Terraform now: destroyed by an HCP Terraform run"

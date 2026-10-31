@@ -21,17 +21,17 @@ def test_existing_env_not_overwritten_by_start(sandbox):
 
 
 def test_aws_deploy_order(sandbox):
-    """TC-5.2: `make -n aws-deploy` runs cognito, then backend, then frontend."""
+    """TC-5.2: `make -n aws-deploy` runs the backend, then the frontend (Cognito is Terraform now)."""
     result = sandbox.run("aws-deploy", dry_run=True)
 
     assert result.returncode == 0, result.stderr
     output = result.stdout
-    idx_cognito = output.index("infra/cognito.yaml")
+    assert "infra/cognito.yaml" not in output
     idx_backend_ecr = output.index("infra/backend-ecr.yaml")
     idx_backend = output.index("infra/backend.yaml")
     idx_frontend = output.index("infra/frontend.yaml")
 
-    assert idx_cognito < idx_backend_ecr < idx_backend < idx_frontend
+    assert idx_backend_ecr < idx_backend < idx_frontend
 
 
 def test_backend_stack_guarded_on_missing_cognito(sandbox):
@@ -68,7 +68,7 @@ def test_frontend_publish_guarded_on_missing_backend(sandbox):
 def test_failed_stack_cleanup_applies_to_every_stack_target(repo_root):
     """TC-5.6: every `*-stack`/`-ecr` recipe calls the same clear_failed_stack helper."""
     text = (repo_root / "Makefile").read_text(encoding="utf-8")
-    targets = ["aws-backend-ecr", "aws-backend-stack", "aws-frontend-stack", "aws-cognito-stack"]
+    targets = ["aws-backend-ecr", "aws-backend-stack", "aws-frontend-stack"]
 
     for target in targets:
         pattern = rf"^{re.escape(target)}:.*\n(?:\t.*\n?)+"
