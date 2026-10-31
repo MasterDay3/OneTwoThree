@@ -72,6 +72,8 @@ Resources:
   # (the bucket's notification needs the permission), and !GetAtt Bucket.Arn would be a cycle.
   ReportsBucket:
     Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     DependsOn: MailerInvokePermission
     Properties:
       Tags:
@@ -106,6 +108,8 @@ Resources:
   # =====================================================================
   RequestDeadLetterQueue:
     Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Tags:
         - Key: PROJECT_NAME
@@ -115,6 +119,8 @@ Resources:
 
   RequestQueue:
     Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Tags:
         - Key: PROJECT_NAME
@@ -132,6 +138,8 @@ Resources:
   # =====================================================================
   SchedulerRole:
     Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Tags:
         - Key: PROJECT_NAME
@@ -156,6 +164,8 @@ Resources:
 
   WeeklySchedule:
     Type: AWS::Scheduler::Schedule
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Name: !Sub ${ProjectName}-weekly-report
       Description: Ask for last week's meetings report every Monday morning.
@@ -175,6 +185,8 @@ Resources:
   # =====================================================================
   BuilderLogGroup:
     Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Tags:
         - Key: PROJECT_NAME
@@ -185,6 +197,8 @@ Resources:
   # Database sign-in, writing reports, and reading its queue (the Lambda service polls SQS for it).
   BuilderRole:
     Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Tags:
         - Key: PROJECT_NAME
@@ -217,6 +231,8 @@ Resources:
 
   BuilderFunction:
     Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Tags:
         - Key: PROJECT_NAME
@@ -250,6 +266,8 @@ Resources:
 
   BuilderQueueMapping:
     Type: AWS::Lambda::EventSourceMapping
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       EventSourceArn: !GetAtt RequestQueue.Arn
       FunctionName: !Ref BuilderFunction
@@ -261,6 +279,8 @@ Resources:
   # =====================================================================
   MailerLogGroup:
     Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Tags:
         - Key: PROJECT_NAME
@@ -272,6 +292,8 @@ Resources:
   # uploaded to reports/ would start itself forever.
   MailerRole:
     Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Tags:
         - Key: PROJECT_NAME
@@ -300,6 +322,8 @@ Resources:
 
   MailerFunction:
     Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Tags:
         - Key: PROJECT_NAME
@@ -358,6 +382,8 @@ Resources:
 
   MailerInvokePermission:
     Type: AWS::Lambda::Permission
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       FunctionName: !Ref MailerFunction
       Action: lambda:InvokeFunction
@@ -370,11 +396,15 @@ Resources:
   # =====================================================================
   DomainIdentity:
     Type: AWS::SES::EmailIdentity
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       EmailIdentity: !Ref Domain
 
   RecipientIdentity:
     Type: AWS::SES::EmailIdentity
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       EmailIdentity: !Select [0, !Split [",", !Ref ReportRecipients]]
 

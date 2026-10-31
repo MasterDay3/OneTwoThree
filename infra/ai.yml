@@ -55,6 +55,8 @@ Parameters:
 Resources:
   ParserLogGroup:
     Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Tags:
         - Key: PROJECT_NAME
@@ -65,6 +67,8 @@ Resources:
   # Logs and Bedrock, nothing else: no database, no S3, no other AWS service.
   ParserRole:
     Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Tags:
         - Key: PROJECT_NAME
@@ -90,6 +94,8 @@ Resources:
 
   ParserFunction:
     Type: AWS::Lambda::Function
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Tags:
         - Key: PROJECT_NAME
@@ -120,6 +126,8 @@ Resources:
   # Public URL; the handler checks the Cognito ID token on every call and rejects the rest with 401.
   ParserFunctionUrl:
     Type: AWS::Lambda::Url
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TargetFunctionArn: !Ref ParserFunction
       AuthType: NONE
@@ -132,6 +140,8 @@ Resources:
   # A public function URL needs both permissions (as the API's in backend.yaml).
   ParserFunctionUrlPermission:
     Type: AWS::Lambda::Permission
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       FunctionName: !Ref ParserFunction
       Action: lambda:InvokeFunctionUrl
@@ -140,6 +150,8 @@ Resources:
 
   ParserFunctionInvokePermission:
     Type: AWS::Lambda::Permission
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       FunctionName: !Ref ParserFunction
       Action: lambda:InvokeFunction
@@ -150,6 +162,8 @@ Resources:
   # forecast says it will.
   MonthlyBudget:
     Type: AWS::Budgets::Budget
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       Budget:
         BudgetName: !Sub ${ProjectName}-monthly

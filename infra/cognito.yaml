@@ -33,6 +33,8 @@ Conditions:
 Resources:
   UserPool:
     Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       UserPoolName: !Sub ${ProjectName}-users
       UserPoolTier: ESSENTIALS
@@ -67,6 +69,8 @@ Resources:
   # across AWS, hence the account ID.
   UserPoolDomain:
     Type: AWS::Cognito::UserPoolDomain
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       UserPoolId: !Ref UserPool
       Domain: !Sub ${ProjectName}-${AWS::AccountId}
@@ -74,6 +78,8 @@ Resources:
 
   GoogleIdentityProvider:
     Type: AWS::Cognito::UserPoolIdentityProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Condition: GoogleEnabled
     Properties:
       UserPoolId: !Ref UserPool
@@ -92,6 +98,8 @@ Resources:
   # the ID tokens it receives.
   UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       ClientName: !Sub ${ProjectName}-web
       UserPoolId: !Ref UserPool
@@ -123,6 +131,8 @@ Resources:
   # Without a style, a version 2 domain has no sign-in page to show.
   ManagedLoginBranding:
     Type: AWS::Cognito::ManagedLoginBranding
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       UserPoolId: !Ref UserPool
       ClientId: !Ref UserPoolClient
