@@ -80,7 +80,27 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
 
       - name: Lint CloudFormation templates
-        run: uvx cfn-lint --format parseable infra/*.yaml infra/*.yml
+        run: uvx cfn-lint --format parseable infra/*.yaml
+
+  terraform:
+    name: Infra (terraform fmt, validate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.17.1
+
+      # No backend and no credentials: the plan itself runs in HCP Terraform as a PR check.
+      - name: Format and validate
+        working-directory: infra
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
 
   infra-tests:
     name: Infra tests (templates, Makefile deploy contract, workflows)

@@ -128,9 +128,7 @@ class MakeSandbox:
         dist_dir = self.root / "front" / "dist"
         (dist_dir / "assets").mkdir(parents=True)
         (dist_dir / "index.html").write_text("<html></html>\n", encoding="utf-8")
-        (dist_dir / "assets" / "app.js").write_text(
-            "// stub build output\n", encoding="utf-8"
-        )
+        (dist_dir / "assets" / "app.js").write_text("// stub build output\n", encoding="utf-8")
 
         stub_src = Path(__file__).resolve().parent / "stub_cmd.py"
         stub_body = stub_src.read_text(encoding="utf-8")
@@ -194,9 +192,7 @@ class MakeSandbox:
             cmd.append(f"{key}={value}")
         run_env = self.base_env()
         run_env.update(env or {})
-        return subprocess.run(
-            cmd, cwd=self.root, env=run_env, capture_output=True, text=True, timeout=60
-        )
+        return subprocess.run(cmd, cwd=self.root, env=run_env, capture_output=True, text=True, timeout=60)
 
     def run_script(self, relative_path, *args, env=None):
         script = self.root / relative_path
