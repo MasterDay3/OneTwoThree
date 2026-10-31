@@ -66,7 +66,18 @@ from cfn_yaml import load_path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-STUB_BINARIES = ("aws", "docker", "npm", "curl", "dig", "sleep", "uv", "uvx", "gh")
+STUB_BINARIES = (
+    "aws",
+    "docker",
+    "npm",
+    "curl",
+    "dig",
+    "sleep",
+    "uv",
+    "uvx",
+    "gh",
+    "terraform",
+)
 
 # Exact-name environment variables stripped from every sandboxed run.
 _STRIP_EXACT = {"DOMAIN", "TAG", "MAKEFLAGS", "MAKELEVEL", "MFLAGS"}
@@ -107,13 +118,19 @@ class MakeSandbox:
 
         shutil.copy(REPO_ROOT / "Makefile", self.root / "Makefile")
         shutil.copy(REPO_ROOT / ".env.example", self.root / ".env.example")
-        shutil.copytree(REPO_ROOT / "infra", self.root / "infra")
+        shutil.copytree(
+            REPO_ROOT / "infra",
+            self.root / "infra",
+            ignore=shutil.ignore_patterns(".terraform", "__pycache__"),
+        )
 
         (self.root / "back").mkdir()
         dist_dir = self.root / "front" / "dist"
         (dist_dir / "assets").mkdir(parents=True)
         (dist_dir / "index.html").write_text("<html></html>\n", encoding="utf-8")
-        (dist_dir / "assets" / "app.js").write_text("// stub build output\n", encoding="utf-8")
+        (dist_dir / "assets" / "app.js").write_text(
+            "// stub build output\n", encoding="utf-8"
+        )
 
         stub_src = Path(__file__).resolve().parent / "stub_cmd.py"
         stub_body = stub_src.read_text(encoding="utf-8")
@@ -130,7 +147,16 @@ class MakeSandbox:
     def _write_rules(self):
         self.stub_rules_path.write_text(json.dumps(self._rules), encoding="utf-8")
 
-    def stub(self, cmd, match=None, stdout="", stderr="", exit=0, output_file=None, invoke_payload=None):
+    def stub(
+        self,
+        cmd,
+        match=None,
+        stdout="",
+        stderr="",
+        exit=0,
+        output_file=None,
+        invoke_payload=None,
+    ):
         rule = {
             "cmd": cmd,
             "match": list(match or []),
@@ -168,7 +194,9 @@ class MakeSandbox:
             cmd.append(f"{key}={value}")
         run_env = self.base_env()
         run_env.update(env or {})
-        return subprocess.run(cmd, cwd=self.root, env=run_env, capture_output=True, text=True, timeout=60)
+        return subprocess.run(
+            cmd, cwd=self.root, env=run_env, capture_output=True, text=True, timeout=60
+        )
 
     def run_script(self, relative_path, *args, env=None):
         script = self.root / relative_path

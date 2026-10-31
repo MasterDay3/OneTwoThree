@@ -15,7 +15,7 @@ def _happy_path(sandbox):
     sandbox.stub("aws", match=["describe-stacks", "meetings-backend", "ApiUrl"], stdout=FUNCTION_URL)
     sandbox.stub("aws", match=["describe-stacks", "meetings-frontend", "BucketName"], stdout="site-bucket")
     sandbox.stub("aws", match=["describe-stacks", "meetings-frontend", "DistributionId"], stdout="E123")
-    sandbox.stub("aws", match=["describe-stacks", "meetings-cognito", "UserPoolId"], stdout="us-east-1_pool")
+    sandbox.stub("terraform", match=["output", "cognito_user_pool_id"], stdout="us-east-1_pool")
 
 
 def _cfn_mutations(sandbox):
@@ -174,19 +174,19 @@ def test_push_never_tags_latest(sandbox):
 
 
 def test_frontend_gets_the_parser_url_once_the_ai_stack_exists(sandbox):
-    """Paste an agenda: VITE_PARSER_URL is the ai stack's ParserUrl, empty (no paste box) before it."""
+    """Paste an agenda: VITE_PARSER_URL is Terraform's parser_url output, empty (no paste box) without it."""
     _happy_path(sandbox)
     assert sandbox.run("deploy-frontend").returncode == 0
     assert sandbox.calls("npm")[-1]["env"]["VITE_PARSER_URL"] == ""
 
     parser_url = "https://parser.lambda-url.us-east-1.on.aws/"
-    sandbox.stub("aws", match=["describe-stacks", "meetings-ai", "ParserUrl"], stdout=parser_url)
+    sandbox.stub("terraform", match=["output", "parser_url"], stdout=parser_url)
     assert sandbox.run("deploy-frontend").returncode == 0
     assert sandbox.calls("npm")[-1]["env"]["VITE_PARSER_URL"] == parser_url
 
 
 def test_deploy_backend_moves_the_agenda_parser_to_the_new_tag(sandbox):
-    """The parser runs the backend image (infra/ai.yml); it is skipped while its stack does not exist."""
+    """The parser runs the backend image (infra/ai.tf); it is skipped while the function does not exist."""
     _happy_path(sandbox)
     assert sandbox.run("deploy-backend", vars={"TAG": "abc"}).returncode == 0
     updated = [c["argv"] for c in sandbox.calls("aws") if "update-function-code" in c["argv"]]

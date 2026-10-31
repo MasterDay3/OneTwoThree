@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-10-18
-- **Code:** `back/app/ai/agenda.py`, `back/app/ai/agenda_lambda.py`, `infra/ai.yml`,
+- **Code:** `back/app/ai/agenda.py`, `back/app/ai/agenda_lambda.py`, `infra/ai.tf`,
   `front/src/components/AgendaDialog.tsx`, `PUT /api/meetings/{id}/agenda`
 
 ## Context
@@ -69,7 +69,7 @@ Constraints:
 - **Cost per parse.** At list prices, a one-page agenda is ~1,500–3,000 input tokens and ~500
   output tokens: about $0.01–0.02 on Opus 5.5, under $0.001 on Haiku 5.5. The measured numbers are in
   the test table in `docs/lab6-answers.md`. Idle cost is $0: a Lambda function, a function URL and
-  a log group with 7-day retention. A $5/month AWS Budgets alarm (`infra/ai.yml`) emails the owner
+  a log group with 7-day retention. A $5/month AWS Budgets alarm (`infra/ai.tf`) emails the owner
   when the account's actual or forecast monthly cost passes $5.
 - **What is logged.** One JSON line per parse in `/aws/lambda/meetings-agenda-parser`
   (`make aws-ai-logs`): `event` (`agenda_parsed` / `agenda_parse_failed`), `user` (Cognito `sub`,
@@ -87,7 +87,7 @@ Constraints:
   suggestion, so a new prompt or model can be compared with the old one on the saved
   suggestion/saved-agenda pairs before it is switched on.
 - **New moving parts:** one more Lambda function to deploy (`make deploy-backend` moves it to each
-  new image tag, as it does the report builder) and one more stack (`make aws-ai-stack`).
+  new image tag, as it does the report builder) and one more stack (infra/ai.tf; the workspace variable budget_email).
 
 ## Container diagram (C4, level 2)
 

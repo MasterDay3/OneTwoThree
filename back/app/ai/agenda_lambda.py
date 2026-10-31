@@ -1,4 +1,4 @@
-"""agenda-parser Lambda (infra/ai.yml): POST pasted text to the function URL, get a suggested agenda back.
+"""agenda-parser Lambda (infra/ai.tf): POST pasted text to the function URL, get a suggested agenda back.
 
 It runs the backend image with this module as its handler, outside the VPC: it needs Bedrock and
 Cognito's signing keys, never the database. It only suggests; the browser saves the agenda the user

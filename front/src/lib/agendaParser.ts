@@ -2,7 +2,7 @@ import { getIdToken } from "@/lib/auth"
 import { toDateInput } from "@/lib/calendar"
 import type { ParsedAgenda } from "@/types"
 
-/** What the agenda parser (infra/ai.yml) answers with: a suggestion, never a saved agenda. */
+/** What the agenda parser (infra/ai.tf) answers with: a suggestion, never a saved agenda. */
 export interface ParseResult {
   agenda: ParsedAgenda
   model: string

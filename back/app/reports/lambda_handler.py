@@ -1,4 +1,4 @@
-"""report-builder Lambda: builds one week's report and saves it to S3 (infra/reports.yaml).
+"""report-builder Lambda: builds one week's report and saves it to S3 (infra/reports.tf).
 
 It runs the backend image with this module as its handler, and takes two event shapes:
 - an SQS event from the report-requests queue, whose message bodies look like

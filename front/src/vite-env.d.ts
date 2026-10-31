@@ -10,7 +10,7 @@ interface ImportMetaEnv {
   readonly VITE_COGNITO_DOMAIN?: string
   /** "true" once Google is set up as an identity provider in the user pool. */
   readonly VITE_COGNITO_GOOGLE?: string
-  /** Agenda parser function URL (infra/ai.yml); empty = no Paste an agenda box. */
+  /** Agenda parser function URL (infra/ai.tf); empty = no Paste an agenda box. */
   readonly VITE_PARSER_URL?: string
 }
 

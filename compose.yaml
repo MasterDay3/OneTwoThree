@@ -19,7 +19,7 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       CORS_ORIGINS: ${CORS_ORIGINS}
       SEED: ${SEED:-false}
-      # Empty (no `make aws-cognito-deploy` yet) = auth disabled, everyone is one local user.
+      # Empty (no `make aws-cognito-env` yet) = auth disabled, everyone is one local user.
       COGNITO_REGION: ${COGNITO_REGION:-us-east-1}
       COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID:-}
       COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:-}

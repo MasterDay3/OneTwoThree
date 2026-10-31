@@ -110,7 +110,7 @@ Resources:
                   - lambda:GetFunctionConfiguration
                   - lambda:InvokeFunction
                 Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-backend
-              # The weekly report builder runs the same image and moves to the same tag (infra/reports.yaml).
+              # The weekly report builder runs the same image and moves to the same tag (infra/reports.tf).
               - Sid: LambdaReportBuilder
                 Effect: Allow
                 Action:
@@ -118,7 +118,7 @@ Resources:
                   - lambda:GetFunction
                   - lambda:GetFunctionConfiguration
                 Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-report-builder
-              # So does the agenda parser (infra/ai.yml).
+              # So does the agenda parser (infra/ai.tf).
               - Sid: LambdaAgendaParser
                 Effect: Allow
                 Action:
