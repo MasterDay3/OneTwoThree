@@ -11,6 +11,9 @@ app_origins = [
   "http://localhost:5173",
   "https://d33h5u6cgxnug1.cloudfront.net",
   "https://app.mykollazab.pp.ua",
+  # Spry's core on Google Cloud (gcp/, Firebase Hosting) signs in with the same user pool.
+  "https://spry-mykola-2026.web.app",
+  "https://spry-mykola-2026.firebaseapp.com",
 ]
 google_client_id = "8926023606-u45dae9ahabjssv4rs44vfsl1c0bbp1u.apps.googleusercontent.com"
 
