@@ -603,6 +603,67 @@ aws-deploy: aws-check aws-backend-deploy aws-frontend-deploy ## Deploy the backe
 .PHONY: aws-destroy
 aws-destroy: aws-frontend-destroy aws-backend-domain-destroy aws-backend-destroy $(if $(DESTROY_OIDC),aws-oidc-destroy) ## Delete the CloudFormation stacks (each asks first; DESTROY_OIDC=1 also removes the CI role). infra/*.tf: a destroy run in HCP Terraform
 
+##@ Google Cloud (gcp/: the core on Cloud Run, Cloud SQL and Firebase Hosting; sign-in stays on AWS)
+
+GCLOUD      ?= gcloud
+GCP_DIR     := gcp
+GCP_PROJECT := $(shell sed -n 's/^project_id *= *"\(.*\)"/\1/p' $(GCP_DIR)/terraform.tfvars)
+GCP_REGION  := $(shell sed -n 's/^region *= *"\(.*\)"/\1/p' $(GCP_DIR)/terraform.tfvars)
+gcp_output   = $(shell cd $(GCP_DIR) && $(TERRAFORM) output -raw $(1) 2>/dev/null)
+
+.PHONY: gcp-bootstrap
+gcp-bootstrap: ## Once, as yourself: service accounts, their roles, Firebase (gcp/bootstrap, local state). Plans; apply with `cd gcp/bootstrap && terraform apply tfplan`
+	cd $(GCP_DIR)/bootstrap && $(TERRAFORM) init -input=false && $(TERRAFORM) plan -input=false -out=tfplan
+
+.PHONY: gcp-init
+gcp-init: ## terraform init in gcp/ (state in the HCP Terraform workspace meetings-gcp, local execution)
+	cd $(GCP_DIR) && $(TERRAFORM) init -input=false
+
+.PHONY: gcp-check
+gcp-check: ## terraform fmt -check and validate in gcp/ (touches nothing in the cloud)
+	cd $(GCP_DIR) && $(TERRAFORM) fmt -check -recursive && $(TERRAFORM) validate
+
+.PHONY: gcp-plan
+gcp-plan: ## Plan gcp/ into gcp/tfplan (as the Terraform service account; needs `gcloud auth login --update-adc`)
+	cd $(GCP_DIR) && $(TERRAFORM) plan -input=false -out=tfplan
+
+.PHONY: gcp-apply
+gcp-apply: ## Apply the saved gcp/tfplan, and nothing else (run gcp-plan or gcp-destroy-plan first and read it)
+	cd $(GCP_DIR) && $(TERRAFORM) apply -input=false tfplan
+
+.PHONY: gcp-deploy-backend
+gcp-deploy-backend: ## Build back/Dockerfile for linux/amd64, push it to Artifact Registry with tag $(TAG), roll Cloud Run onto it (migrations run on start)
+	@reg="$(call gcp_output,registry)"; svc="$(call gcp_output,api_service)"; \
+	[ -n "$$reg" ] || { echo "gcp/ not applied: run make gcp-init gcp-plan gcp-apply first"; exit 1; }; \
+	$(GCLOUD) auth print-access-token | docker login -u oauth2accesstoken --password-stdin "https://$(GCP_REGION)-docker.pkg.dev" && \
+	docker buildx build --platform linux/amd64 --provenance=false -t "$$reg/backend:$(TAG)" --push back && \
+	$(GCLOUD) run services update "$$svc" --project $(GCP_PROJECT) --region $(GCP_REGION) --image "$$reg/backend:$(TAG)"
+
+.PHONY: gcp-deploy-frontend
+gcp-deploy-frontend: ## Build the SPA for one origin (/api/** is rewritten to Cloud Run, front/firebase.json) and deploy it to Firebase Hosting (with your gcloud ADC; Firebase APIs need the quota project)
+	@[ -n "$(COGNITO_POOL_ID)" ] || { echo "No Cognito outputs: make infra-init (sign-in stays on AWS)"; exit 1; }; \
+	(cd front && npm ci --no-audit --no-fund && VITE_API_URL= \
+	  VITE_COGNITO_REGION=$(AWS_REGION) VITE_COGNITO_USER_POOL_ID=$(COGNITO_POOL_ID) \
+	  VITE_COGNITO_CLIENT_ID=$(COGNITO_CLIENT) VITE_COGNITO_DOMAIN=$(call tf_output,cognito_hosted_ui_domain) \
+	  VITE_COGNITO_GOOGLE=$(call tf_output,cognito_google_enabled) VITE_PARSER_URL=$(call tf_output,parser_url) \
+	  npm run build && GOOGLE_CLOUD_QUOTA_PROJECT=$(GCP_PROJECT) npx --yes firebase-tools@14 deploy --only hosting --project $(GCP_PROJECT) --non-interactive)
+
+.PHONY: gcp-health
+gcp-health: ## Call /api/health through Firebase Hosting (reads the database; a cold start runs migrations first)
+	curl -fsS "$(call gcp_output,site_url)/api/health" && echo
+
+.PHONY: gcp-db-stop
+gcp-db-stop: ## Stop the Cloud SQL instance (no compute bill; the 10 GB disk still bills $$1.70 a month)
+	$(GCLOUD) sql instances patch $(call gcp_output,db_instance) --project $(GCP_PROJECT) --activation-policy NEVER --quiet
+
+.PHONY: gcp-db-start
+gcp-db-start: ## Start the Cloud SQL instance again (~1 min)
+	$(GCLOUD) sql instances patch $(call gcp_output,db_instance) --project $(GCP_PROJECT) --activation-policy ALWAYS --quiet
+
+.PHONY: gcp-destroy-plan
+gcp-destroy-plan: ## Plan deleting everything in gcp/ into gcp/tfplan (then make gcp-apply). gcp/bootstrap stays
+	cd $(GCP_DIR) && $(TERRAFORM) plan -destroy -input=false -out=tfplan
+
 ##@ Help
 
 .PHONY: help

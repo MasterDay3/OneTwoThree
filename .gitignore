@@ -10,3 +10,6 @@ dist/
 
 # AWS app-stack overrides (may hold account-specific values)
 infra/*.params.env
+
+# Firebase CLI deploy cache (front/firebase.json)
+.firebase/
