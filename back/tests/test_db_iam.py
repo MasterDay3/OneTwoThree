@@ -42,3 +42,19 @@ def test_password_auth_adds_no_connect_hook(monkeypatch):
     engine = db.create_db_engine(poolclass=NullPool)
 
     assert "password" not in _run_connect_hooks(engine)
+
+
+def test_cloud_sql_socket_directory_is_passed_as_the_host(monkeypatch):
+    """Cloud Run mounts Cloud SQL as a unix socket under /cloudsql/<connection name>; psycopg takes
+    the directory as the host, password sign-in, no TLS settings of ours (the connector encrypts)."""
+    monkeypatch.setattr(settings, "database_url", None)
+    monkeypatch.setattr(settings, "db_iam_auth", False)
+    monkeypatch.setattr(settings, "db_host", "/cloudsql/spry-mykola-2026:us-central1:meetings-db")
+    monkeypatch.setattr(settings, "db_password", "secret")
+    engine = db.create_db_engine(poolclass=NullPool)
+
+    _, cparams = engine.dialect.create_connect_args(engine.url)
+
+    assert cparams["host"] == "/cloudsql/spry-mykola-2026:us-central1:meetings-db"
+    assert cparams["password"] == "secret"
+    assert "sslmode" not in cparams
